@@ -124,7 +124,12 @@ interface AdminAppProps {
   onDeleteProduce: (produceId: string) => void;
   onBuyFarmerProduct?: (farmerProduce: ProduceItem, boughtQuantity: number, resalePrice?: number) => void;
   onPutInSupermarketStock?: (productData: any) => void;
-  onUpdateOrderStatus?: (orderId: string, status: any) => void;
+  onUpdateOrderStatus?: (
+    orderId: string,
+    status: any,
+    cancelReason?: string,
+    cancelledBy?: string
+  ) => void;
   onUpdateTransportJobStatus?: (jobId: string, status: TransportJob['status']) => void;
   onAcceptTransportJob?: (jobId: string) => void;
   onAdminLogin: (adminUser: UserProfile) => void;
@@ -179,11 +184,13 @@ export const AdminApp: React.FC<AdminAppProps> = ({
   const [adminPassword, setAdminPassword] = useState('');
   const [loginError, setLoginError] = useState<string | null>(null);
 
-  // Active module tab in Admin Mobile App: Overview, Bantay Presyo, Users, Crops, Stocks, Transactions, Profile
-  // (SQL Database is no longer a menu item — it opens directly on the /sql route)
   const [adminTab, setAdminTab] = useState<AdminModuleTab>(
     adminPath === 'sql' ? 'database' : 'overview'
   );
+
+  // Cancellation Modal for Admin
+  const [adminOrderToCancel, setAdminOrderToCancel] = useState<Order | null>(null);
+  const [adminCancelReasonInput, setAdminCancelReasonInput] = useState<string>('');
 
   // Deep-link: typing localhost:3000/sql opens the SQL Database module directly
   useEffect(() => {
@@ -275,7 +282,8 @@ export const AdminApp: React.FC<AdminAppProps> = ({
   const [roleFilter, setRoleFilter] = useState<'all' | 'pending' | 'farmer' | 'buyer' | 'transporter' | 'suspended'>('all');
   const [produceSearch, setProduceSearch] = useState('');
   const [transactionSearch, setTransactionSearch] = useState('');
-  const [transactionStatusFilter, setTransactionStatusFilter] = useState<'all' | 'completed' | 'delivered' | 'in_transit' | 'pending'>('all');
+  const [transactionStatusFilter, setTransactionStatusFilter] = useState<'all' | 'completed' | 'delivered' | 'in_transit' | 'pending' | 'cancelled'>('all');
+  const [haulFilter, setHaulFilter] = useState<'active' | 'in_transit' | 'delivered' | 'cancelled' | 'all'>('active');
 
   // DA Bantay Presyo search (category buttons removed)
   const [daPriceSearch, setDaPriceSearch] = useState('');
@@ -540,6 +548,75 @@ export const AdminApp: React.FC<AdminAppProps> = ({
     }
   };
 
+  // Helper to determine whether a transport haul is cancelled (via job status or linked order status)
+  const isJobOrOrderCancelled = useCallback(
+    (job: TransportJob): boolean => {
+      if (job.status === 'cancelled') return true;
+      const normJobOrderId = String(job.orderId || '').replace('#', '').trim().toLowerCase();
+      const normJobId = String(job.id || '').replace('#', '').trim().toLowerCase();
+
+      const linkedOrder = orders.find((o) => {
+        const normOrderId = String(o.id || '').replace('#', '').trim().toLowerCase();
+        const normOrderJobId = String(o.transportJobId || '').replace('#', '').trim().toLowerCase();
+
+        return (
+          (normOrderId && normJobOrderId && normOrderId === normJobOrderId) ||
+          (normOrderId && normJobId && normOrderId === normJobId) ||
+          (normOrderJobId && normJobId && normOrderJobId === normJobId) ||
+          (o.farmName &&
+            job.pickupFarm &&
+            o.farmName.trim().toLowerCase() === job.pickupFarm.trim().toLowerCase() &&
+            o.buyerName &&
+            job.buyerName &&
+            o.buyerName.trim().toLowerCase() === job.buyerName.trim().toLowerCase() &&
+            job.status !== 'delivered')
+        );
+      });
+      return linkedOrder?.status === 'cancelled';
+    },
+    [orders]
+  );
+
+  // Active uncancelled live hauls
+  const activeLiveHauls = useMemo(() => {
+    return transportJobs.filter((j) => j.status !== 'delivered' && j.status !== 'cancelled' && !isJobOrOrderCancelled(j));
+  }, [transportJobs, isJobOrOrderCancelled]);
+
+  const cancelledHauls = useMemo(() => {
+    return transportJobs.filter((j) => isJobOrOrderCancelled(j));
+  }, [transportJobs, isJobOrOrderCancelled]);
+
+  const deliveredHauls = useMemo(() => {
+    return transportJobs.filter((j) => !isJobOrOrderCancelled(j) && j.status === 'delivered');
+  }, [transportJobs, isJobOrOrderCancelled]);
+
+  const inTransitHauls = useMemo(() => {
+    return transportJobs.filter(
+      (j) => !isJobOrOrderCancelled(j) && (j.status === 'picked_up' || j.status === 'in_transit')
+    );
+  }, [transportJobs, isJobOrOrderCancelled]);
+
+  // Displayed hauls list based on selected haulFilter
+  const displayedHauls = useMemo(() => {
+    return transportJobs.filter((job) => {
+      const isCancelled = isJobOrOrderCancelled(job);
+      if (haulFilter === 'active') {
+        return !isCancelled && job.status !== 'delivered' && job.status !== 'cancelled';
+      }
+      if (haulFilter === 'in_transit') {
+        return !isCancelled && (job.status === 'picked_up' || job.status === 'in_transit');
+      }
+      if (haulFilter === 'delivered') {
+        return !isCancelled && job.status === 'delivered';
+      }
+      if (haulFilter === 'cancelled') {
+        return isCancelled;
+      }
+      // 'all'
+      return !isCancelled;
+    });
+  }, [transportJobs, haulFilter, isJobOrOrderCancelled]);
+
   // Metrics computation
   const stats = useMemo(() => {
     const nonAdminUsers = registeredUsers.filter((u) => u.role !== 'admin' && u.email !== 'admin@gmail.com');
@@ -550,9 +627,12 @@ export const AdminApp: React.FC<AdminAppProps> = ({
     const verifiedUsers = nonAdminUsers.filter((u) => u.verified);
     const suspendedUsers = nonAdminUsers.filter((u) => u.status === 'suspended');
 
-    const totalOrderValue = orders.reduce((sum, o) => sum + o.totalAmount, 0);
+    const validOrders = orders.filter((o) => o.status !== 'cancelled');
+    const totalOrderValue = validOrders.reduce((sum, o) => sum + o.totalAmount, 0);
     const completedOrders = orders.filter((o) => o.status === 'completed');
-    const activeTransportJobs = transportJobs.filter((j) => j.status !== 'delivered');
+    const activeTransportJobs = transportJobs.filter(
+      (j) => j.status !== 'delivered' && !isJobOrOrderCancelled(j)
+    );
 
     return {
       totalUsers: nonAdminUsers.length,
@@ -568,7 +648,7 @@ export const AdminApp: React.FC<AdminAppProps> = ({
       totalOrderValue,
       activeTransportJobs: activeTransportJobs.length,
     };
-  }, [registeredUsers, produceList, orders, transportJobs]);
+  }, [registeredUsers, produceList, orders, transportJobs, isJobOrOrderCancelled]);
 
   // Filtered DA Daily Prices (Category buttons removed)
   const filteredDaPrices = useMemo(() => {
@@ -1199,9 +1279,20 @@ export const AdminApp: React.FC<AdminAppProps> = ({
   const transactionsList = useMemo(() => {
     return orders.map((order) => {
       // Find matching transport job for this order
-      const matchingJob = transportJobs.find(
-        (j) => j.orderId === order.id || j.id === order.id || j.buyerName === order.buyerName
-      );
+      const normOrderId = String(order.id || '').replace('#', '').trim().toLowerCase();
+      const normJobId = String(order.transportJobId || '').replace('#', '').trim().toLowerCase();
+      const matchingJob = transportJobs.find((j) => {
+        const jOrderId = String(j.orderId || '').replace('#', '').trim().toLowerCase();
+        const jId = String(j.id || '').replace('#', '').trim().toLowerCase();
+        return (
+          (jOrderId && jOrderId === normOrderId) ||
+          (jId && jId === normOrderId) ||
+          (normJobId && jId === normJobId) ||
+          (order.farmName && j.pickupFarm && order.farmName.trim().toLowerCase() === j.pickupFarm.trim().toLowerCase() &&
+           order.buyerName && j.buyerName && order.buyerName.trim().toLowerCase() === j.buyerName.trim().toLowerCase() &&
+           j.status !== 'delivered' && j.status !== 'cancelled')
+        );
+      });
 
       // Find matching transporter profile
       const transporterId = matchingJob?.assignedTransporterId || order.transporterId;
@@ -1266,6 +1357,7 @@ export const AdminApp: React.FC<AdminAppProps> = ({
         if (item.order.status !== 'completed' && item.job?.status !== 'delivered') return false;
       } else if (transactionStatusFilter === 'in_transit') {
         if (
+          item.order.status === 'cancelled' ||
           item.order.status === 'completed' ||
           (item.order.status !== 'in_transit' &&
             item.order.status !== 'picked_up' &&
@@ -1275,7 +1367,9 @@ export const AdminApp: React.FC<AdminAppProps> = ({
           return false;
         }
       } else if (transactionStatusFilter === 'pending') {
-        if (item.order.status === 'completed' || item.job?.status === 'delivered') return false;
+        if (item.order.status === 'cancelled' || item.order.status === 'completed' || item.job?.status === 'delivered') return false;
+      } else if (transactionStatusFilter === 'cancelled') {
+        if (item.order.status !== 'cancelled' && item.job?.status !== 'cancelled') return false;
       }
 
       // Search query
@@ -1845,30 +1939,6 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                 </div>
               </div>
 
-              {/* Pending Transporters Alert Pill */}
-              {stats.pendingTransporters > 0 && (
-                <div
-                  onClick={() => {
-                    setRoleFilter('pending');
-                    setAdminTab('users');
-                  }}
-                  className="bg-amber-50 border border-amber-300 rounded-2xl p-3 flex items-center justify-between gap-2 shadow-2xs cursor-pointer"
-                >
-                  <div className="flex items-center gap-2 min-w-0">
-                    <div className="w-7 h-7 rounded-xl bg-amber-500 text-white flex items-center justify-center flex-shrink-0 font-bold">
-                      <Clock className="w-4 h-4" />
-                    </div>
-                    <div className="min-w-0">
-                      <p className="text-xs font-bold text-amber-950 truncate">
-                        {stats.pendingTransporters} Driver{stats.pendingTransporters > 1 ? 's' : ''} Awaiting Account Approval
-                      </p>
-                      <p className="text-[10px] text-amber-800">Tap to review & approve driver credentials</p>
-                    </div>
-                  </div>
-                  <ChevronRight className="w-4 h-4 text-amber-600 flex-shrink-0" />
-                </div>
-              )}
-
               {/* TAB 1: OVERVIEW & KPIS */}
               {adminTab === 'overview' && (
                 <div className="space-y-3">
@@ -1880,9 +1950,9 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                     </div>
 
                     <div className="bg-amber-50/70 border border-amber-200 rounded-2xl p-3 text-center space-y-0.5">
-                      <span className="text-[10px] text-amber-800 uppercase font-bold">Delivery Drivers</span>
-                      <p className="text-xl font-extrabold text-amber-950 font-display">{stats.transporters}</p>
-                      <span className="text-[9px] text-amber-600 font-medium">{stats.pendingTransporters} pending review</span>
+                      <span className="text-[10px] text-amber-800 uppercase font-bold">Registered Buyers</span>
+                      <p className="text-xl font-extrabold text-amber-950 font-display">{stats.buyers}</p>
+                      <span className="text-[9px] text-amber-600 font-medium">Community consumers</span>
                     </div>
 
                     <div className="bg-sky-50/70 border border-sky-200 rounded-2xl p-3 text-center space-y-0.5">
@@ -2074,18 +2144,18 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                             {/* Price Grid Breakdown */}
                             <div className="grid grid-cols-3 gap-1.5 bg-neutral-50 p-2 rounded-2xl text-center border border-neutral-150">
                               <div>
-                                <span className="text-[9px] text-neutral-500 uppercase font-semibold">Store Price (SRP)</span>
-                                <p className="text-xs font-bold text-neutral-900 font-mono">₱{item.prevailingRetailPrice}</p>
+                                <span className="text-[9px] text-emerald-800 uppercase font-semibold">DA Suggested</span>
+                                <p className="text-xs font-bold text-emerald-700 font-mono">₱{item.suggestedDirectFarmPrice}</p>
                               </div>
                               <div className="border-x border-neutral-200 px-1">
+                                <span className="text-[9px] text-neutral-500 uppercase font-semibold">Wet Market</span>
+                                <p className="text-xs font-bold text-neutral-900 font-mono">₱{item.prevailingRetailPrice}</p>
+                              </div>
+                              <div>
                                 <span className="text-[9px] text-neutral-500 uppercase font-semibold">Price Range</span>
                                 <p className="text-xs font-bold text-neutral-800 font-mono">
                                   ₱{item.priceRangeMin}-{item.priceRangeMax}
                                 </p>
-                              </div>
-                              <div>
-                                <span className="text-[9px] text-emerald-800 uppercase font-semibold">Farmer Cost</span>
-                                <p className="text-xs font-bold text-emerald-700 font-mono">₱{item.prevailingFarmgatePrice}</p>
                               </div>
                             </div>
 
@@ -2111,12 +2181,7 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                               )}
                             </div>
 
-                            {/* Market Note */}
-                            {item.notes && (
-                              <p className="text-[10px] text-neutral-500 italic pl-1">
-                                ℹ️ {item.notes}
-                              </p>
-                            )}
+
                           </div>
                         );
                       })
@@ -2340,12 +2405,7 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                   {produceSubTab === 'farmer_offers' ? (
                     /* SUB-TAB 1: FARMER HARVEST SUBMISSIONS (BUY DESK) */
                     <div className="space-y-2.5">
-                      <div className="bg-emerald-50 border border-emerald-200 rounded-2xl p-3 text-xs text-emerald-950 flex items-start gap-2">
-                        <Sprout className="w-4 h-4 text-emerald-700 flex-shrink-0 mt-0.5" />
-                        <p className="leading-relaxed text-[11px]">
-                          <strong>Buy & Resell Desk:</strong> Review harvest lots submitted by farmers. Once you buy a crop, it will be deducted from the farmer's stock, assigned to a Transporter for farm-to-hub hauling, and stocked in the <strong>Supermarket Store Stock</strong> for buyers.
-                        </p>
-                      </div>
+
 
                       {farmerOffersList.length === 0 ? (
                         <div className="bg-white border border-neutral-200 rounded-3xl p-6 text-center text-xs text-neutral-500">
@@ -2430,7 +2490,7 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                                       className="flex-1 py-2 px-3 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-extrabold rounded-xl shadow-xs cursor-pointer flex items-center justify-center gap-1.5 active:scale-95 transition-all"
                                     >
                                       <ShoppingBag className="w-3.5 h-3.5" />
-                                      <span>Buy Wholesale from Farmer</span>
+                                      <span>Buy Product</span>
                                     </button>
                                   )}
                                 </div>
@@ -3018,9 +3078,9 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                     >
                       <Truck className="w-3.5 h-3.5" />
                       <span>Live Transport & Hauls</span>
-                      {transportJobs.filter((j) => j.status !== 'delivered').length > 0 && (
+                      {activeLiveHauls.length > 0 && (
                         <span className="ml-1 bg-amber-500 text-white text-[9px] font-black px-1.5 py-0.2 rounded-full">
-                          {transportJobs.filter((j) => j.status !== 'delivered').length}
+                          {activeLiveHauls.length}
                         </span>
                       )}
                     </button>
@@ -3042,82 +3102,121 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                   {/* SUB-VIEW 1: LIVE TRANSPORT FLEET (OWNER DRIVER LOGISTICS) */}
                   {transactionSubTab === 'live_logistics' ? (
                     <div className="space-y-3">
-                      {/* Owner Logistics Command Banner */}
-                      <div className="bg-gradient-to-br from-emerald-900 via-teal-900 to-emerald-950 text-white rounded-3xl p-4 space-y-2 shadow-xs border border-emerald-800/80">
-                        <div className="flex items-center justify-between">
-                          <div className="flex items-center gap-2">
-                            <div className="w-9 h-9 rounded-2xl bg-amber-500/20 text-amber-400 border border-amber-400/30 flex items-center justify-center">
-                              <Truck className="w-5 h-5" />
-                            </div>
-                            <div>
-                              <h3 className="font-extrabold text-sm text-white flex items-center gap-1.5">
-                                <span>Owner Logistics Fleet</span>
-                                <span className="bg-amber-400 text-neutral-950 text-[9px] font-black px-1.5 py-0.2 rounded">
-                                  You
-                                </span>
-                              </h3>
-                              <p className="text-[10px] text-emerald-200 font-medium">
-                                Direct Farm-to-Supermarket & Buyer Hauling
-                              </p>
-                            </div>
-                          </div>
-                          <span className="text-[9px] font-mono font-bold bg-emerald-800/90 text-emerald-100 px-2 py-0.5 rounded-full border border-emerald-600">
-                            VC-OWNER-01
+
+
+                      {/* Quick Metric Pills / Interactive Status Filter */}
+                      <div className="grid grid-cols-4 gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => setHaulFilter('active')}
+                          className={`rounded-2xl p-2 text-center transition-all cursor-pointer border ${
+                            haulFilter === 'active'
+                              ? 'bg-amber-500 text-white border-amber-600 shadow-xs'
+                              : 'bg-white border-neutral-200 hover:bg-neutral-50'
+                          }`}
+                        >
+                          <span className={`text-[9px] font-bold block uppercase ${haulFilter === 'active' ? 'text-amber-100' : 'text-neutral-500'}`}>Active</span>
+                          <span className={`text-sm font-black ${haulFilter === 'active' ? 'text-white' : 'text-amber-700'}`}>
+                            {activeLiveHauls.length}
                           </span>
-                        </div>
-                        <p className="text-[11px] text-emerald-100/90 leading-relaxed bg-emerald-950/50 p-2.5 rounded-xl border border-emerald-800/50">
-                          As the store owner, you pick up the harvest lots directly from local farms in Valencia & Dauin and haul them to the VeggieConnect Supermarket or deliver them straight to buyers.
-                        </p>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setHaulFilter('in_transit')}
+                          className={`rounded-2xl p-2 text-center transition-all cursor-pointer border ${
+                            haulFilter === 'in_transit'
+                              ? 'bg-emerald-700 text-white border-emerald-800 shadow-xs'
+                              : 'bg-white border-neutral-200 hover:bg-neutral-50'
+                          }`}
+                        >
+                          <span className={`text-[9px] font-bold block uppercase ${haulFilter === 'in_transit' ? 'text-emerald-200' : 'text-neutral-500'}`}>In Transit</span>
+                          <span className={`text-sm font-black ${haulFilter === 'in_transit' ? 'text-white' : 'text-emerald-700'}`}>
+                            {inTransitHauls.length}
+                          </span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setHaulFilter('delivered')}
+                          className={`rounded-2xl p-2 text-center transition-all cursor-pointer border ${
+                            haulFilter === 'delivered'
+                              ? 'bg-neutral-800 text-white border-neutral-900 shadow-xs'
+                              : 'bg-white border-neutral-200 hover:bg-neutral-50'
+                          }`}
+                        >
+                          <span className={`text-[9px] font-bold block uppercase ${haulFilter === 'delivered' ? 'text-neutral-300' : 'text-neutral-500'}`}>Delivered</span>
+                          <span className={`text-sm font-black ${haulFilter === 'delivered' ? 'text-white' : 'text-neutral-800'}`}>
+                            {deliveredHauls.length}
+                          </span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setHaulFilter('cancelled')}
+                          className={`rounded-2xl p-2 text-center transition-all cursor-pointer border ${
+                            haulFilter === 'cancelled'
+                              ? 'bg-red-700 text-white border-red-800 shadow-xs'
+                              : 'bg-white border-neutral-200 hover:bg-neutral-50'
+                          }`}
+                        >
+                          <span className={`text-[9px] font-bold block uppercase ${haulFilter === 'cancelled' ? 'text-red-200' : 'text-neutral-500'}`}>Cancelled</span>
+                          <span className={`text-sm font-black ${haulFilter === 'cancelled' ? 'text-white' : 'text-red-600'}`}>
+                            {cancelledHauls.length}
+                          </span>
+                        </button>
                       </div>
 
-                      {/* Quick Metric Pills */}
-                      <div className="grid grid-cols-3 gap-2">
-                        <div className="bg-white border border-neutral-200 rounded-2xl p-2.5 text-center shadow-2xs">
-                          <span className="text-[10px] font-bold text-neutral-500 block uppercase">Pending Pickup</span>
-                          <span className="text-base font-black text-amber-700">
-                            {transportJobs.filter((j) => j.status === 'available' || j.status === 'accepted').length}
+                      {/* Filter Status Subheader */}
+                      <div className="flex items-center justify-between px-1 text-xs">
+                        <div className="flex items-center gap-1.5 font-bold text-neutral-700">
+                          <span className="capitalize">{haulFilter.replace('_', ' ')} Hauls</span>
+                          <span className="text-[10px] bg-neutral-100 text-neutral-600 px-2 py-0.5 rounded-full font-mono">
+                            {displayedHauls.length} total
                           </span>
                         </div>
-                        <div className="bg-white border border-neutral-200 rounded-2xl p-2.5 text-center shadow-2xs">
-                          <span className="text-[10px] font-bold text-neutral-500 block uppercase">In Transit</span>
-                          <span className="text-base font-black text-emerald-700">
-                            {transportJobs.filter((j) => j.status === 'picked_up' || j.status === 'in_transit').length}
-                          </span>
-                        </div>
-                        <div className="bg-white border border-neutral-200 rounded-2xl p-2.5 text-center shadow-2xs">
-                          <span className="text-[10px] font-bold text-neutral-500 block uppercase">Delivered</span>
-                          <span className="text-base font-black text-neutral-800">
-                            {transportJobs.filter((j) => j.status === 'delivered').length}
-                          </span>
-                        </div>
+                        {haulFilter !== 'active' && (
+                          <button
+                            type="button"
+                            onClick={() => setHaulFilter('active')}
+                            className="text-[11px] font-bold text-amber-700 hover:underline cursor-pointer flex items-center gap-1"
+                          >
+                            <span>← Show Active Hauls</span>
+                          </button>
+                        )}
                       </div>
 
                       {/* Transport Jobs List */}
                       <div className="space-y-3 pt-1">
-                        {transportJobs.length === 0 ? (
+                        {displayedHauls.length === 0 ? (
                           <div className="bg-white border border-neutral-200 rounded-3xl p-6 text-center text-xs text-neutral-500 space-y-2">
                             <Truck className="w-8 h-8 text-neutral-300 mx-auto stroke-[1.5]" />
-                            <p className="font-semibold text-neutral-700">No transport jobs recorded yet</p>
-                            <p className="text-[11px] text-neutral-400">
-                              When you purchase crops from farmers or buyers place delivery orders, transport routes will appear here for you to execute!
+                            <p className="font-bold text-neutral-800 text-sm">
+                              {haulFilter === 'active'
+                                ? 'No active transport hauls'
+                                : haulFilter === 'cancelled'
+                                ? 'No cancelled hauls recorded'
+                                : `No ${haulFilter} hauls recorded`}
                             </p>
+                            <p className="text-[11px] text-neutral-400">
+                              {haulFilter === 'active'
+                                ? 'All active transport trips have either completed or been cancelled.'
+                                : 'Haul records will appear here as they change status.'}
+                            </p>
+
                           </div>
                         ) : (
-                          transportJobs.map((job) => {
-                            const isDelivered = job.status === 'delivered';
-                            const isInTransit = job.status === 'in_transit';
-                            const isPickedUp = job.status === 'picked_up';
-                            const isAccepted = job.status === 'accepted';
-                            const isAvailable = job.status === 'available';
+                          displayedHauls.map((job) => {
+                            const isCancelled = isJobOrOrderCancelled(job);
+                            const isDelivered = !isCancelled && job.status === 'delivered';
+                            const isInTransit = !isCancelled && job.status === 'in_transit';
+                            const isPickedUp = !isCancelled && job.status === 'picked_up';
+                            const isAccepted = !isCancelled && job.status === 'accepted';
+                            const isAvailable = !isCancelled && job.status === 'available';
 
                             const matchingTx = transactionsList.find(
                               (t) => t.order.id === job.orderId || t.job?.id === job.id
                             );
+                            const linkedOrder = matchingTx?.order || orders.find((o) => o.id === job.orderId || o.transportJobId === job.id);
 
                             // LIVE ROUTE: supermarket hub ➔ THIS haul's supplying farm (active hauls only).
-                            // Seed the resolver from the linked order + its first supplying item so
-                            // two active hauls resolve to their own corresponding route locations.
-                            const linkedOrder = matchingTx?.order;
                             const supplyItem = linkedOrder?.items?.[0];
                             const linkedFarmer =
                               matchingTx?.farmer ||
@@ -3131,7 +3230,6 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                                         u.farmName.trim().toLowerCase()))
                               );
                             const farmHouse = resolveFarmHouseCoordinates({
-                              // Only pass a direct pin when it belongs to this haul's supplying farmer.
                               ...(linkedFarmer &&
                               linkedFarmer.id === (supplyItem?.farmerId || linkedOrder?.farmerId)
                                 ? {
@@ -3150,21 +3248,16 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                               itemFarmName: supplyItem?.farmName,
                             });
                             const routeStats = haulRouteStats[job.id];
-                            const straightLineKm =
-                              Math.round(
-                                calculateDistanceKm(
-                                  supermarketHub.lat,
-                                  supermarketHub.lng,
-                                  farmHouse.coords.lat,
-                                  farmHouse.coords.lng
-                                ) * 10
-                              ) / 10;
 
                             return (
                               <div
                                 key={job.id}
                                 className={`bg-white border rounded-3xl p-4 space-y-3 shadow-xs transition-all ${
-                                  !isDelivered ? 'border-amber-300 ring-1 ring-amber-200' : 'border-neutral-200'
+                                  isCancelled
+                                    ? 'border-red-200 bg-red-50/25'
+                                    : !isDelivered
+                                    ? 'border-amber-300 ring-1 ring-amber-200'
+                                    : 'border-neutral-200'
                                 }`}
                               >
                                 {/* Header: Route ID, Status Pill, Cargo Weight */}
@@ -3174,7 +3267,12 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                                       <span className="text-xs font-black text-neutral-900 font-mono">
                                         HAUL #{job.id}
                                       </span>
-                                      {isDelivered ? (
+                                      {isCancelled ? (
+                                        <span className="text-[9px] font-extrabold px-2 py-0.5 rounded-full uppercase bg-red-100 text-red-800 border border-red-300 flex items-center gap-1">
+                                          <XCircle className="w-3 h-3 text-red-600" />
+                                          <span>ORDER CANCELLED & RESTOCKED</span>
+                                        </span>
+                                      ) : isDelivered ? (
                                         <span className="text-[9px] font-extrabold px-2 py-0.5 rounded-full uppercase bg-emerald-100 text-emerald-800">
                                           DELIVERED ✓
                                         </span>
@@ -3208,31 +3306,43 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                                   </div>
                                 </div>
 
-                                {/* Visual Transport Progress Bar (5 Steps) */}
-                                <div className="space-y-1 bg-neutral-50 p-2.5 rounded-2xl border border-neutral-100">
-                                  <div className="flex items-center justify-between text-[10px] font-bold">
-                                    <span className={isAvailable ? 'text-amber-700' : 'text-neutral-400'}>1. Listed</span>
-                                    <span className={isAccepted ? 'text-sky-700' : 'text-neutral-400'}>2. Heading to Farm</span>
-                                    <span className={isPickedUp ? 'text-amber-700' : 'text-neutral-400'}>3. Crates Loaded</span>
-                                    <span className={isInTransit ? 'text-amber-700' : 'text-neutral-400'}>4. In Transit</span>
-                                    <span className={isDelivered ? 'text-emerald-700 font-extrabold' : 'text-neutral-400'}>5. Delivered</span>
+                                {/* Visual Transport Progress Bar or Cancelled Banner */}
+                                {isCancelled ? (
+                                  <div className="bg-red-100/70 border border-red-200 rounded-2xl p-2.5 flex items-center justify-between text-xs text-red-800">
+                                    <div className="flex items-center gap-1.5 font-bold">
+                                      <XCircle className="w-4 h-4 text-red-600 shrink-0" />
+                                      <span>Haul Cancelled — Order voided by user</span>
+                                    </div>
+                                    <span className="text-[10px] font-bold bg-white text-red-700 px-2 py-0.5 rounded-lg border border-red-200">
+                                      Crops Restocked
+                                    </span>
                                   </div>
-                                  <div className="w-full bg-neutral-200 h-2 rounded-full overflow-hidden flex">
-                                    <div
-                                      className={`h-full transition-all duration-300 ${
-                                        isDelivered
-                                          ? 'w-full bg-emerald-600'
-                                          : isInTransit
-                                          ? 'w-4/5 bg-amber-500 animate-pulse'
-                                          : isPickedUp
-                                          ? 'w-3/5 bg-amber-500'
-                                          : isAccepted
-                                          ? 'w-2/5 bg-sky-500'
-                                          : 'w-1/5 bg-amber-400'
-                                      }`}
-                                    />
+                                ) : (
+                                  <div className="space-y-1 bg-neutral-50 p-2.5 rounded-2xl border border-neutral-100">
+                                    <div className="flex items-center justify-between text-[10px] font-bold">
+                                      <span className={isAvailable ? 'text-amber-700' : 'text-neutral-400'}>1. Listed</span>
+                                      <span className={isAccepted ? 'text-sky-700' : 'text-neutral-400'}>2. Heading to Farm</span>
+                                      <span className={isPickedUp ? 'text-amber-700' : 'text-neutral-400'}>3. Crates Loaded</span>
+                                      <span className={isInTransit ? 'text-amber-700' : 'text-neutral-400'}>4. In Transit</span>
+                                      <span className={isDelivered ? 'text-emerald-700 font-extrabold' : 'text-neutral-400'}>5. Delivered</span>
+                                    </div>
+                                    <div className="w-full bg-neutral-200 h-2 rounded-full overflow-hidden flex">
+                                      <div
+                                        className={`h-full transition-all duration-300 ${
+                                          isDelivered
+                                            ? 'w-full bg-emerald-600'
+                                            : isInTransit
+                                            ? 'w-4/5 bg-amber-500 animate-pulse'
+                                            : isPickedUp
+                                            ? 'w-3/5 bg-amber-500'
+                                            : isAccepted
+                                            ? 'w-2/5 bg-sky-500'
+                                            : 'w-1/5 bg-amber-400'
+                                        }`}
+                                      />
+                                    </div>
                                   </div>
-                                </div>
+                                )}
 
                                 {/* Cargo Payload Summary */}
                                 <div className="bg-emerald-50/60 border border-emerald-200/80 rounded-2xl p-2.5 text-xs text-emerald-950 font-medium space-y-1">
@@ -3263,8 +3373,8 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                                   </div>
                                 </div>
 
-                                {/* LIVE ROUTE MAP: Supermarket Hub ➔ Farmer's House */}
-                                {!isDelivered && (
+                                {/* LIVE ROUTE MAP: Supermarket Hub ➔ Farmer's House (Active Uncancelled Hauls Only) */}
+                                {!isDelivered && !isCancelled && (
                                   <div className="border border-red-200 bg-red-50/40 rounded-2xl overflow-hidden">
                                     <div className="flex items-center justify-between gap-2 px-2.5 py-2 bg-gradient-to-r from-red-700 to-red-600 text-white">
                                       <div className="flex items-center gap-1.5 min-w-0">
@@ -3300,73 +3410,118 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                                   </div>
                                 )}
 
-                                {/* Owner Interactive Step Execution Controls */}
-                                <div className="space-y-2 pt-1">
-                                  {isAvailable && (
-                                    <button
-                                      onClick={() => handleAdvanceTransportJob(job, 'accepted')}
-                                      className="w-full py-2.5 px-3 bg-amber-600 hover:bg-amber-700 text-white rounded-xl text-xs font-black flex items-center justify-center gap-1.5 shadow-xs cursor-pointer active:scale-95 transition-all"
-                                    >
-                                      <Truck className="w-4 h-4" />
-                                      <span>🚜 I'll Pick This Up (Start Route to Farm)</span>
-                                    </button>
-                                  )}
-
-                                  {isAccepted && (
-                                    <button
-                                      onClick={() => handleAdvanceTransportJob(job, 'picked_up')}
-                                      className="w-full py-2.5 px-3 bg-amber-600 hover:bg-amber-700 text-white rounded-xl text-xs font-black flex items-center justify-center gap-1.5 shadow-xs cursor-pointer active:scale-95 transition-all"
-                                    >
-                                      <Package className="w-4 h-4" />
-                                      <span>📦 Mark Crates Loaded at Farm Gate</span>
-                                    </button>
-                                  )}
-
-                                  {isPickedUp && (
-                                    <button
-                                      onClick={() => handleAdvanceTransportJob(job, 'in_transit')}
-                                      className="w-full py-2.5 px-3 bg-amber-600 hover:bg-amber-700 text-white rounded-xl text-xs font-black flex items-center justify-center gap-1.5 shadow-xs cursor-pointer active:scale-95 transition-all animate-pulse"
-                                    >
-                                      <Truck className="w-4 h-4" />
-                                      <span>🚚 Start In-Transit GPS Haul (Driving to Store)</span>
-                                    </button>
-                                  )}
-
-                                  {isInTransit && (
-                                    <button
-                                      onClick={() => handleAdvanceTransportJob(job, 'delivered')}
-                                      className="w-full py-2.5 px-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-black flex items-center justify-center gap-1.5 shadow-md cursor-pointer active:scale-95 transition-all"
-                                    >
-                                      <CheckCircle2 className="w-4 h-4" />
-                                      <span>✅ Confirm Delivery & Stock Received in Supermarket</span>
-                                    </button>
-                                  )}
-
-                                  {isDelivered && (
-                                    <div className="flex items-center justify-between gap-2">
-                                      <span className="text-[11px] font-bold text-emerald-800 flex items-center gap-1">
-                                        <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
-                                        <span>Haul Completed & Stocked in Supermarket</span>
+                                {/* Owner Interactive Step Execution Controls or Cancelled Summary */}
+                                {isCancelled ? (
+                                  <div className="bg-red-50 border border-red-200 rounded-2xl p-3 text-xs text-red-900 space-y-1.5">
+                                    <div className="flex items-center justify-between font-bold">
+                                      <span className="flex items-center gap-1">
+                                        <AlertCircle className="w-3.5 h-3.5 text-red-600" />
+                                        <span>Cancellation Notice</span>
                                       </span>
-                                      {matchingTx && (
-                                        <button
-                                          onClick={() =>
-                                            setSelectedReceiptData({
-                                              order: matchingTx.order,
-                                              job: matchingTx.job,
-                                              transporter: matchingTx.transporter,
-                                              farmer: matchingTx.farmer,
-                                              buyer: matchingTx.buyer,
-                                            })
-                                          }
-                                          className="px-2.5 py-1 bg-neutral-100 hover:bg-neutral-200 text-neutral-700 text-[10px] font-bold rounded-lg cursor-pointer"
-                                        >
-                                          Receipt
-                                        </button>
+                                      {(linkedOrder?.cancelledAt || job.cancelledAt) && (
+                                        <span className="text-[10px] text-red-600 font-mono">
+                                          {linkedOrder?.cancelledAt || job.cancelledAt}
+                                        </span>
                                       )}
                                     </div>
-                                  )}
-                                </div>
+                                    <p className="text-[11px] text-red-700 leading-relaxed">
+                                      This haul was voided because order #{job.orderId} was cancelled. All reserved crop lots were safely restored to live inventory.
+                                    </p>
+                                    {(linkedOrder?.cancelReason || job.cancelReason) && (
+                                      <div className="text-[11px] text-red-800 pt-1 border-t border-red-200/60 font-medium">
+                                        <strong>Reason:</strong> {linkedOrder?.cancelReason || job.cancelReason}
+                                      </div>
+                                    )}
+                                    {linkedOrder?.cancelledBy && (
+                                      <div className="text-[10px] text-red-600 font-medium">
+                                        Cancelled by: {linkedOrder.cancelledBy}
+                                      </div>
+                                    )}
+                                  </div>
+                                ) : (
+                                  <div className="space-y-2 pt-1">
+                                    {isAvailable && (
+                                      <button
+                                        onClick={() => handleAdvanceTransportJob(job, 'accepted')}
+                                        className="w-full py-2.5 px-3 bg-amber-600 hover:bg-amber-700 text-white rounded-xl text-xs font-black flex items-center justify-center gap-1.5 shadow-xs cursor-pointer active:scale-95 transition-all"
+                                      >
+                                        <Truck className="w-4 h-4" />
+                                        <span>🚜 I'll Pick This Up (Start Route to Farm)</span>
+                                      </button>
+                                    )}
+
+                                    {isAccepted && (
+                                      <button
+                                        onClick={() => handleAdvanceTransportJob(job, 'picked_up')}
+                                        className="w-full py-2.5 px-3 bg-amber-600 hover:bg-amber-700 text-white rounded-xl text-xs font-black flex items-center justify-center gap-1.5 shadow-xs cursor-pointer active:scale-95 transition-all"
+                                      >
+                                        <Package className="w-4 h-4" />
+                                        <span>📦 Mark Crates Loaded at Farm Gate</span>
+                                      </button>
+                                    )}
+
+                                    {isPickedUp && (
+                                      <button
+                                        onClick={() => handleAdvanceTransportJob(job, 'in_transit')}
+                                        className="w-full py-2.5 px-3 bg-amber-600 hover:bg-amber-700 text-white rounded-xl text-xs font-black flex items-center justify-center gap-1.5 shadow-xs cursor-pointer active:scale-95 transition-all animate-pulse"
+                                      >
+                                        <Truck className="w-4 h-4" />
+                                        <span>🚚 Start In-Transit GPS Haul (Driving to Store)</span>
+                                      </button>
+                                    )}
+
+                                    {isInTransit && (
+                                      <button
+                                        onClick={() => handleAdvanceTransportJob(job, 'delivered')}
+                                        className="w-full py-2.5 px-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-black flex items-center justify-center gap-1.5 shadow-md cursor-pointer active:scale-95 transition-all"
+                                      >
+                                        <CheckCircle2 className="w-4 h-4" />
+                                        <span>✅ Confirm Delivery & Stock Received in Supermarket</span>
+                                      </button>
+                                    )}
+
+                                    {isDelivered && (
+                                      <div className="flex items-center justify-between gap-2">
+                                        <span className="text-[11px] font-bold text-emerald-800 flex items-center gap-1">
+                                          <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+                                          <span>Haul Completed & Stocked in Supermarket</span>
+                                        </span>
+                                        {matchingTx && (
+                                          <button
+                                            onClick={() =>
+                                              setSelectedReceiptData({
+                                                order: matchingTx.order,
+                                                job: matchingTx.job,
+                                                transporter: matchingTx.transporter,
+                                                farmer: matchingTx.farmer,
+                                                buyer: matchingTx.buyer,
+                                              })
+                                            }
+                                            className="px-2.5 py-1 bg-neutral-100 hover:bg-neutral-200 text-neutral-700 text-[10px] font-bold rounded-lg cursor-pointer"
+                                          >
+                                            Receipt
+                                          </button>
+                                        )}
+                                      </div>
+                                    )}
+
+                                    {/* Direct Cancel Order Button on Active Hauls */}
+                                    {linkedOrder && linkedOrder.status !== 'cancelled' && linkedOrder.status !== 'completed' && onUpdateOrderStatus && (
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          setAdminOrderToCancel(linkedOrder);
+                                          setAdminCancelReasonInput('');
+                                        }}
+                                        className="w-full py-2 px-3 bg-red-50 hover:bg-red-100 text-red-700 border border-red-200 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 shadow-2xs cursor-pointer active:scale-95 transition-all mt-1"
+                                        title="Cancel this order"
+                                      >
+                                        <XCircle className="w-3.5 h-3.5 text-red-600" />
+                                        <span>Cancel Order</span>
+                                      </button>
+                                    )}
+                                  </div>
+                                )}
                               </div>
                             );
                           })
@@ -3421,6 +3576,14 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                           }`}
                         >
                           In Transit / Active
+                        </button>
+                        <button
+                          onClick={() => setTransactionStatusFilter('cancelled')}
+                          className={`px-2.5 py-1.5 rounded-xl text-xs font-bold whitespace-nowrap cursor-pointer ${
+                            transactionStatusFilter === 'cancelled' ? 'bg-red-700 text-white font-bold' : 'bg-red-50 text-red-700 border border-red-200'
+                          }`}
+                        >
+                          Cancelled ({transactionsList.filter((t) => t.order.status === 'cancelled').length})
                         </button>
                       </div>
 
@@ -3542,18 +3705,38 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                                     Payment: <span className="font-bold text-neutral-800">{tx.order.paymentMethod || 'Cash on Delivery (COD)'}</span>
                                   </div>
                                   <div className="flex items-center gap-1.5 ml-auto">
-                                    {!isDelivered && onUpdateOrderStatus && (
-                                      <button
-                                        onClick={() => {
-                                          onUpdateOrderStatus(tx.order.id, 'completed');
-                                          showToast(`Order #${tx.order.id} marked as Completed & Delivered ✓`);
-                                        }}
-                                        className="px-2.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold flex items-center gap-1 shadow-2xs cursor-pointer active:scale-95 transition-all"
-                                        title="Mark order as completed"
-                                      >
-                                        <CheckCircle2 className="w-3.5 h-3.5" />
-                                        <span>Mark Delivered</span>
-                                      </button>
+                                    {tx.order.status === 'cancelled' ? (
+                                      <span className="text-[10px] bg-red-100 text-red-800 border border-red-300 font-bold px-2.5 py-1 rounded-xl flex items-center gap-1">
+                                        <XCircle className="w-3 h-3 text-red-600" />
+                                        <span>Cancelled & Restocked</span>
+                                      </span>
+                                    ) : (
+                                      !isDelivered && onUpdateOrderStatus && (
+                                        <>
+                                          <button
+                                            onClick={() => {
+                                              setAdminOrderToCancel(tx.order);
+                                              setAdminCancelReasonInput('');
+                                            }}
+                                            className="px-2.5 py-1.5 bg-red-50 hover:bg-red-100 text-red-700 border border-red-200 rounded-xl text-xs font-bold flex items-center gap-1 shadow-2xs cursor-pointer active:scale-95 transition-all"
+                                            title="Cancel order and immediately restock inventory"
+                                          >
+                                            <XCircle className="w-3.5 h-3.5 text-red-600" />
+                                            <span>Cancel Order</span>
+                                          </button>
+                                          <button
+                                            onClick={() => {
+                                              onUpdateOrderStatus(tx.order.id, 'completed');
+                                              showToast(`Order #${tx.order.id} marked as Completed & Delivered ✓`);
+                                            }}
+                                            className="px-2.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold flex items-center gap-1 shadow-2xs cursor-pointer active:scale-95 transition-all"
+                                            title="Mark order as completed"
+                                          >
+                                            <CheckCircle2 className="w-3.5 h-3.5" />
+                                            <span>Mark Delivered</span>
+                                          </button>
+                                        </>
+                                      )
                                     )}
                                     <button
                                       onClick={() =>
@@ -3969,6 +4152,91 @@ export const AdminApp: React.FC<AdminAppProps> = ({
           </nav>
         )}
       </div>
+
+      {/* ADMIN ORDER CANCELLATION MODAL */}
+      {adminOrderToCancel && (
+        <div className="absolute inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-3 animate-in fade-in duration-200">
+          <div className="bg-white rounded-3xl max-w-sm w-full max-h-[92%] overflow-y-auto p-5 space-y-4 shadow-2xl border border-red-200 text-neutral-900 relative">
+            <button
+              onClick={() => {
+                setAdminOrderToCancel(null);
+                setAdminCancelReasonInput('');
+              }}
+              className="absolute top-4 right-4 w-8 h-8 rounded-full bg-neutral-100 text-neutral-600 flex items-center justify-center hover:bg-neutral-200 cursor-pointer"
+            >
+              <X className="w-4 h-4" />
+            </button>
+
+            <div className="flex items-center gap-2.5 text-red-700">
+              <div className="w-9 h-9 rounded-xl bg-red-100 flex items-center justify-center shrink-0">
+                <AlertCircle className="w-5 h-5 text-red-600" />
+              </div>
+              <div className="min-w-0">
+                <h3 className="font-extrabold text-sm text-neutral-900">Admin Cancel Order</h3>
+                <p className="text-[11px] text-neutral-500 font-mono">Order ID: {adminOrderToCancel.id}</p>
+              </div>
+            </div>
+
+            {/* Restock Breakdown */}
+            <div className="bg-emerald-50 border border-emerald-200 rounded-2xl p-3 space-y-2 text-xs">
+              <div className="space-y-1">
+                {adminOrderToCancel.items.map((item, idx) => (
+                  <div key={idx} className="flex items-center justify-between text-[11px] text-emerald-950">
+                    <span className="font-medium truncate mr-2">• {item.produceName}</span>
+                    <span className="font-bold text-emerald-700 shrink-0">+{item.quantity} kg</span>
+                  </div>
+                ))}
+              </div>
+              <div className="pt-1.5 text-right text-[11px] font-black text-emerald-950 border-t border-emerald-200/60">
+                Total Restock: +{adminOrderToCancel.items.reduce((s, it) => s + (it.quantity || 0), 0)} kg
+              </div>
+            </div>
+
+            {/* Direct Input Reason (No multiple choice) */}
+            <div className="space-y-1.5 text-xs">
+              <label className="font-bold text-neutral-800 block">
+                Reason for Cancellation:
+              </label>
+              <textarea
+                rows={3}
+                placeholder="Type the cancellation reason here (e.g., customer request, address adjustment, logistics delay)..."
+                value={adminCancelReasonInput}
+                onChange={(e) => setAdminCancelReasonInput(e.target.value)}
+                className="w-full px-3 py-2 text-xs rounded-xl border border-neutral-300 focus:outline-none focus:ring-2 focus:ring-red-500 bg-neutral-50 focus:bg-white resize-none"
+              />
+            </div>
+
+            {/* Actions */}
+            <div className="space-y-2 pt-2 border-t border-neutral-200">
+              <button
+                onClick={() => {
+                  const finalReason = adminCancelReasonInput.trim() || 'Cancelled by Store Administrator';
+                  if (onUpdateOrderStatus) {
+                    onUpdateOrderStatus(adminOrderToCancel.id, 'cancelled', finalReason, 'Admin Broker Desk');
+                  }
+                  showToast(`Order #${adminOrderToCancel.id} cancelled. Stock restored.`);
+                  setAdminOrderToCancel(null);
+                  setAdminCancelReasonInput('');
+                }}
+                className="w-full py-2.5 px-4 rounded-xl bg-red-600 hover:bg-red-700 text-white font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer shadow-sm active:scale-95 transition-all"
+              >
+                <XCircle className="w-4 h-4" />
+                <span>Confirm Cancelation of Order</span>
+              </button>
+
+              <button
+                onClick={() => {
+                  setAdminOrderToCancel(null);
+                  setAdminCancelReasonInput('');
+                }}
+                className="w-full py-2 px-4 rounded-xl bg-neutral-100 hover:bg-neutral-200 text-neutral-700 font-bold text-xs text-center cursor-pointer transition-colors"
+              >
+                Keep Order
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* OFFICIAL TRANSACTION RECEIPT & OVERVIEW MODAL */}
       {selectedReceiptData && selectedReceiptData.order && (
@@ -4545,7 +4813,7 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                   <p className="text-[10px] text-emerald-900/70 font-semibold -mt-1">
                     {daMatch.commodity} • {daMatch.updatedDate} • {daMatch.source}
                   </p>
-                  <div className="grid grid-cols-3 gap-1.5 text-center">
+                  <div className="grid grid-cols-2 gap-1.5 text-center">
                     <div className="bg-white rounded-xl py-1.5 border border-emerald-200">
                       <span className="text-[9px] uppercase font-bold text-neutral-500 block">DA Suggested</span>
                       <span className="text-xs font-black text-emerald-700">₱{daMatch.suggestedDirectFarmPrice}</span>
@@ -4553,10 +4821,6 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                     <div className="bg-white rounded-xl py-1.5 border border-emerald-200">
                       <span className="text-[9px] uppercase font-bold text-neutral-500 block">Wet Market</span>
                       <span className="text-xs font-black text-neutral-800">₱{daMatch.prevailingRetailPrice}</span>
-                    </div>
-                    <div className="bg-white rounded-xl py-1.5 border border-emerald-200">
-                      <span className="text-[9px] uppercase font-bold text-neutral-500 block">Farmgate</span>
-                      <span className="text-xs font-black text-amber-700">₱{daMatch.prevailingFarmgatePrice}</span>
                     </div>
                   </div>
                   {Math.abs(diff) > 1 ? (
@@ -4634,7 +4898,31 @@ export const AdminApp: React.FC<AdminAppProps> = ({
 
                   <form onSubmit={handleSaveProduceEdit} className="space-y-3">
                     <div>
-                      <label className="text-[10px] font-bold uppercase text-neutral-500">Price per Unit (₱)</label>
+                      <div className="flex items-center justify-between mb-1 gap-2">
+                        <label className="text-[10px] font-bold uppercase text-neutral-500">Price per Unit (₱)</label>
+                        {(() => {
+                          // Farmer's price for this crop (what the admin paid / asked at the farm gate)
+                          const farmerBasePrice =
+                            origItem?.farmgateAskingPrice ||
+                            editingProduceItem.farmgateAskingPrice ||
+                            editingProduceItem.pricePerUnit;
+                          // 10% markup = the admin's profit margin when sold through a buyer's account
+                          const suggestedShelfPrice = Math.round(farmerBasePrice * 1.1 * 100) / 100;
+                          return (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setEditingProduceItem({ ...editingProduceItem, pricePerUnit: suggestedShelfPrice })
+                              }
+                              className="text-[10px] text-emerald-700 hover:underline flex items-center gap-0.5 font-bold cursor-pointer flex-shrink-0"
+                              title={`Auto-set listing price with a 10% markup over the farmer's price (₱${farmerBasePrice.toFixed(2)}/kg) — your profit margin`}
+                            >
+                              <Sparkles className="w-2.5 h-2.5" />
+                              <span>Use Price (₱{suggestedShelfPrice.toFixed(2)})</span>
+                            </button>
+                          );
+                        })()}
+                      </div>
                       <input
                         type="number"
                         min="1"
@@ -4998,9 +5286,26 @@ export const AdminApp: React.FC<AdminAppProps> = ({
 
               {/* Input 2: Resale Retail Price */}
               <div>
-                <label className="block text-[11px] font-bold text-neutral-700 mb-1">
-                  Store Selling Price to Buyers (₱/{puttingInStockItem.unit || 'kg'})
-                </label>
+                <div className="flex items-center justify-between mb-1 gap-2">
+                  <label className="text-[11px] font-bold text-neutral-700">
+                    Store Selling Price to Buyers (₱/{puttingInStockItem.unit || 'kg'})
+                  </label>
+                  {(() => {
+                    // 10% markup over the farmer's price = the admin's profit margin on buyer sales
+                    const suggestedShelfPrice = Math.round(puttingInStockItem.costPricePerUnit * 1.1 * 100) / 100;
+                    return (
+                      <button
+                        type="button"
+                        onClick={() => setStockModalPrice(suggestedShelfPrice)}
+                        className="text-[10px] text-emerald-700 hover:underline flex items-center gap-0.5 font-bold cursor-pointer flex-shrink-0"
+                        title={`Auto-set shelf price with a 10% markup over the farmer's price (₱${puttingInStockItem.costPricePerUnit.toFixed(2)}/kg) — your profit margin`}
+                      >
+                        <Sparkles className="w-2.5 h-2.5" />
+                        <span>Use Price (₱{suggestedShelfPrice.toFixed(2)})</span>
+                      </button>
+                    );
+                  })()}
+                </div>
                 <div className="relative">
                   <input
                     type="number"

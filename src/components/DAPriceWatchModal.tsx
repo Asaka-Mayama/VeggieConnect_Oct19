@@ -7,21 +7,18 @@ import {
   Search,
   RefreshCw,
   CheckCircle2,
-  Sprout,
-  Check
+  Sprout
 } from 'lucide-react';
 import { DAPriceItem } from '../types';
 import { DA_BULLETIN_METADATA, DA_DAILY_PRICES } from '../data/daPricesData';
 
 interface DAPriceWatchModalProps {
   onClose: () => void;
-  onApplyPriceToHarvest?: (cropName: string, suggestedPrice: number) => void;
   initialSearch?: string;
 }
 
 export const DAPriceWatchModal: React.FC<DAPriceWatchModalProps> = ({
   onClose,
-  onApplyPriceToHarvest,
   initialSearch = '',
 }) => {
   const [search, setSearch] = useState(
@@ -222,22 +219,6 @@ export const DAPriceWatchModal: React.FC<DAPriceWatchModalProps> = ({
                         <div className="text-[10px] text-neutral-500 font-medium">per kg</div>
                       </div>
                     </div>
-
-                    {/* Simple Use Button */}
-                    {onApplyPriceToHarvest && (
-                      <div className="flex items-center justify-end pt-0.5">
-                        <button
-                          onClick={() => {
-                            onApplyPriceToHarvest(item.commodity, item.suggestedDirectFarmPrice);
-                            onClose();
-                          }}
-                          className="px-3.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs flex items-center gap-1 shadow-xs active:scale-95 transition-all cursor-pointer"
-                        >
-                          <Check className="w-3.5 h-3.5 stroke-[3]" />
-                          <span>Use Price</span>
-                        </button>
-                      </div>
-                    )}
                   </div>
                 );
               })}

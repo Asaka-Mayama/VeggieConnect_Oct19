@@ -278,11 +278,20 @@ export default function App() {
   // Sync with Backend and purge obsolete legacy localStorage keys
   useEffect(() => {
     try {
-      // Remove obsolete versions of stored data
+      // Remove obsolete versions of stored data (legacy keys from older app versions).
+      // Active v9 keys — including the registered-users registry — must NEVER be
+      // purged, otherwise the local account list (login fallback) is wiped on
+      // every page load and farmer/buyer accounts appear "lost" after a restart.
+      const activeKeys = new Set<string>([
+        ...Object.values(STORAGE_KEYS),
+        'veggieconnect_v9_clean_supermarket',
+        'veggieconnect_v9_clean_admin_hub',
+        'veggieconnect_sync_event',
+      ]);
       const oldKeys: string[] = [];
       for (let i = 0; i < localStorage.length; i++) {
         const k = localStorage.key(i);
-        if (k && k.startsWith('veggieconnect_') && !k.includes('_v9_clean')) {
+        if (k && k.startsWith('veggieconnect_') && !k.includes('_v9_clean') && !activeKeys.has(k)) {
           oldKeys.push(k);
         }
       }
@@ -297,44 +306,61 @@ export default function App() {
           if (Array.isArray(remoteProds)) {
             // Intelligent merge: keep any supermarket stocked items that were saved locally
             const localSaved: ProduceItem[] = JSON.parse(localStorage.getItem(STORAGE_KEYS.PRODUCE) || '[]');
-            const remoteMap = new Map<string, ProduceItem>();
-            remoteProds.forEach((p: ProduceItem) => remoteMap.set(p.id, p));
 
-            // Ensure any local supermarket items not in remote or with updated status are preserved
-            localSaved.forEach((localItem: ProduceItem) => {
-              if (
-                localItem.sellerStoreName === 'VeggieConnect Supermarket' ||
-                localItem.sellerStatus === 'bought_and_stocked' ||
-                (localItem.boughtQuantity && localItem.boughtQuantity > 0)
-              ) {
-                const existingInRemote = remoteMap.get(localItem.id);
-                if (!existingInRemote) {
-                  remoteMap.set(localItem.id, localItem);
-                } else if (
-                  localItem.sellerStoreName === 'VeggieConnect Supermarket' &&
-                  existingInRemote.sellerStoreName !== 'VeggieConnect Supermarket'
+            if (remoteProds.length === 0 && localSaved.length > 0) {
+              // The backend came back empty (e.g. the server restarted with fresh
+              // memory). Keep the locally saved listings and re-publish them to the
+              // backend so farmers never lose their produce after an app/browser exit.
+              setProduceList(localSaved);
+              localSaved.forEach((item) => {
+                fetch('/api/products', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify(item),
+                }).catch(() => {});
+              });
+            } else {
+              const remoteMap = new Map<string, ProduceItem>();
+              remoteProds.forEach((p: ProduceItem) => remoteMap.set(p.id, p));
+
+              // Ensure any local supermarket items not in remote or with updated status are preserved
+              localSaved.forEach((localItem: ProduceItem) => {
+                if (
+                  localItem.sellerStoreName === 'VeggieConnect Supermarket' ||
+                  localItem.sellerStatus === 'bought_and_stocked' ||
+                  (localItem.boughtQuantity && localItem.boughtQuantity > 0)
                 ) {
-                  remoteMap.set(localItem.id, {
-                    ...existingInRemote,
-                    sellerStoreName: 'VeggieConnect Supermarket',
-                    sellerStatus: 'bought_and_stocked',
-                    stockQuantity: localItem.stockQuantity,
-                    pricePerUnit: localItem.pricePerUnit,
-                  });
+                  const existingInRemote = remoteMap.get(localItem.id);
+                  if (!existingInRemote) {
+                    remoteMap.set(localItem.id, localItem);
+                  } else if (
+                    localItem.sellerStoreName === 'VeggieConnect Supermarket' &&
+                    existingInRemote.sellerStoreName !== 'VeggieConnect Supermarket'
+                  ) {
+                    remoteMap.set(localItem.id, {
+                      ...existingInRemote,
+                      sellerStoreName: 'VeggieConnect Supermarket',
+                      sellerStatus: 'bought_and_stocked',
+                      stockQuantity: localItem.stockQuantity,
+                      pricePerUnit: localItem.pricePerUnit,
+                    });
+                  }
                 }
-              }
-            });
+              });
 
-            const merged = Array.from(remoteMap.values());
-            setProduceList(merged);
-            localStorage.setItem(STORAGE_KEYS.PRODUCE, JSON.stringify(merged));
+              const merged = Array.from(remoteMap.values());
+              setProduceList(merged);
+              localStorage.setItem(STORAGE_KEYS.PRODUCE, JSON.stringify(merged));
+            }
           }
         }
 
         const ordRes = await fetch('/api/orders');
         if (ordRes.ok) {
           const remoteOrders = await ordRes.json();
-          if (Array.isArray(remoteOrders)) {
+          // Never replace local orders with an empty remote list — an empty list
+          // usually means the backend just restarted with fresh memory.
+          if (Array.isArray(remoteOrders) && remoteOrders.length > 0) {
             setOrders(remoteOrders);
           }
         }
@@ -342,7 +368,7 @@ export default function App() {
         const jobRes = await fetch('/api/transport-jobs');
         if (jobRes.ok) {
           const remoteJobs = await jobRes.json();
-          if (Array.isArray(remoteJobs)) {
+          if (Array.isArray(remoteJobs) && remoteJobs.length > 0) {
             setTransportJobs(remoteJobs);
           }
         }
@@ -350,7 +376,7 @@ export default function App() {
         const msgRes = await fetch('/api/messages');
         if (msgRes.ok) {
           const remoteMsgs = await msgRes.json();
-          if (Array.isArray(remoteMsgs)) {
+          if (Array.isArray(remoteMsgs) && remoteMsgs.length > 0) {
             setMessages(remoteMsgs);
           }
         }
@@ -358,7 +384,9 @@ export default function App() {
         const usersRes = await fetch('/api/users');
         if (usersRes.ok) {
           const remoteUsers = await usersRes.json();
-          if (Array.isArray(remoteUsers)) {
+          // An empty user list from the backend means it restarted with fresh
+          // memory — keep the locally cached registry so accounts are not lost.
+          if (Array.isArray(remoteUsers) && remoteUsers.length > 0) {
             const enriched = remoteUsers.map((u: UserProfile) => {
               if (!u.latitude || !u.longitude) {
                 const c = resolveCoordinates(u.location, u.latitude, u.longitude);
@@ -468,19 +496,22 @@ export default function App() {
         ]);
         if (ordRes.ok) {
           const remoteOrders = await ordRes.json();
-          if (Array.isArray(remoteOrders)) {
+          // Never wipe local orders with an empty remote list (fresh server memory).
+          if (Array.isArray(remoteOrders) && remoteOrders.length > 0) {
             setOrders(remoteOrders);
           }
         }
         if (jobRes.ok) {
           const remoteJobs = await jobRes.json();
-          if (Array.isArray(remoteJobs)) {
+          if (Array.isArray(remoteJobs) && remoteJobs.length > 0) {
             setTransportJobs(remoteJobs);
           }
         }
         if (prodRes.ok) {
           const remoteProds = await prodRes.json();
-          if (Array.isArray(remoteProds)) {
+          // An empty remote list means the backend restarted with fresh memory —
+          // keep the local listings instead of wiping farmer produce.
+          if (Array.isArray(remoteProds) && remoteProds.length > 0) {
             // Merge with local state to ensure locally stocked supermarket items are NEVER wiped out by stale poll
             setProduceList((currentLocal) => {
               const remoteMap = new Map<string, ProduceItem>();
@@ -526,7 +557,9 @@ export default function App() {
         }
         if (userRes.ok) {
           const remoteUsers = await userRes.json();
-          if (Array.isArray(remoteUsers)) {
+          // Never replace the local registered-users registry with an empty list
+          // (backend restarted with fresh memory) — accounts would be "lost".
+          if (Array.isArray(remoteUsers) && remoteUsers.length > 0) {
             const enriched = remoteUsers.map((u: UserProfile) => {
               if (!u.latitude || !u.longitude) {
                 const c = resolveCoordinates(u.location, u.latitude, u.longitude);
@@ -564,6 +597,42 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem(STORAGE_KEYS.JOBS, JSON.stringify(transportJobs));
   }, [transportJobs]);
+
+  // Self-healing synchronization: if an order is cancelled, ensure its transport job is marked cancelled
+  useEffect(() => {
+    const cancelledOrders = orders.filter((o) => o.status === 'cancelled');
+    if (cancelledOrders.length === 0) return;
+
+    setTransportJobs((prevJobs) => {
+      let changed = false;
+      const updated = prevJobs.map((j) => {
+        if (j.status === 'cancelled') return j;
+        const linkedOrder = cancelledOrders.find(
+          (o) =>
+            o.id === j.orderId ||
+            (o.transportJobId && o.transportJobId === j.id) ||
+            (o.farmName && j.pickupFarm && o.farmName.trim().toLowerCase() === j.pickupFarm.trim().toLowerCase() &&
+             o.buyerName && j.buyerName && o.buyerName.trim().toLowerCase() === j.buyerName.trim().toLowerCase() &&
+             j.status !== 'delivered')
+        );
+        if (linkedOrder) {
+          changed = true;
+          return {
+            ...j,
+            status: 'cancelled' as const,
+            cancelReason: linkedOrder.cancelReason || 'Cancelled upon request',
+            cancelledAt: linkedOrder.cancelledAt,
+          };
+        }
+        return j;
+      });
+      if (changed) {
+        localStorage.setItem(STORAGE_KEYS.JOBS, JSON.stringify(updated));
+        return updated;
+      }
+      return prevJobs;
+    });
+  }, [orders]);
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEYS.MESSAGES, JSON.stringify(messages));
@@ -783,7 +852,149 @@ export default function App() {
     showToast(`Order ${newOrder.id} placed directly with ${newOrder.farmName}!`);
   };
 
-  const handleUpdateOrderStatus = (orderId: string, newStatus: OrderStatus) => {
+  const handleUpdateOrderStatus = (
+    orderId: string,
+    newStatus: OrderStatus,
+    cancelReason?: string,
+    cancelledBy?: string
+  ) => {
+    const cleanOrderId = String(orderId || '').replace('#', '').trim().toLowerCase();
+    const targetOrder =
+      orders.find((o) => o.id === orderId || String(o.id).replace('#', '').trim().toLowerCase() === cleanOrderId) ||
+      (() => {
+        try {
+          const saved: Order[] = JSON.parse(localStorage.getItem(STORAGE_KEYS.ORDERS) || '[]');
+          return saved.find((o) => o.id === orderId || String(o.id).replace('#', '').trim().toLowerCase() === cleanOrderId);
+        } catch {
+          return undefined;
+        }
+      })();
+    const previousStatus = targetOrder?.status;
+
+    // 1. If cancelling an active order, RESTOCK PRODUCE INVENTORY & CANCEL HAUL
+    if (newStatus === 'cancelled' && previousStatus !== 'cancelled') {
+      const itemsToRestock = targetOrder?.items || [];
+      let totalRestockedKg = 0;
+
+      if (itemsToRestock.length > 0) {
+        setProduceList((prev) => {
+          const updated = prev.map((prod) => {
+            const matchingItem = itemsToRestock.find(
+              (it) =>
+                it.produceId === prod.id ||
+                (it.produceName && prod.name && it.produceName.trim().toLowerCase() === prod.name.trim().toLowerCase())
+            );
+            if (matchingItem) {
+              const qty = Number(matchingItem.quantity) || 0;
+              totalRestockedKg += qty;
+              const newStock = prod.stockQuantity + qty;
+              const newSellerStatus =
+                prod.sellerStatus === 'sold_out' ? ('bought_and_stocked' as const) : prod.sellerStatus;
+
+              fetch(`/api/products/${prod.id}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ stockQuantity: newStock, sellerStatus: newSellerStatus }),
+              }).catch((e) => console.log('Crop stock restock sync notice:', e));
+
+              return {
+                ...prod,
+                stockQuantity: newStock,
+                sellerStatus: newSellerStatus,
+              };
+            }
+            return prod;
+          });
+          localStorage.setItem(STORAGE_KEYS.PRODUCE, JSON.stringify(updated));
+          return updated;
+        });
+      }
+
+      // Cancel associated transport job
+      const timeNow = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      const finalCancelReason = cancelReason || 'Cancelled upon request';
+      const cancellerName = cancelledBy || currentUser?.name || 'User';
+
+      setTransportJobs((prev) => {
+        const updated = prev.map((j) => {
+          const normJobOrderId = String(j.orderId || '').replace('#', '').trim().toLowerCase();
+          const normJobId = String(j.id || '').replace('#', '').trim().toLowerCase();
+          const normTargetJobId = String(targetOrder?.transportJobId || '').replace('#', '').trim().toLowerCase();
+          const normTargetOrderId = String(targetOrder?.id || '').replace('#', '').trim().toLowerCase();
+
+          const isMatch =
+            normJobOrderId === cleanOrderId ||
+            normJobId === cleanOrderId ||
+            (normTargetOrderId && normJobOrderId === normTargetOrderId) ||
+            (normTargetJobId && normJobId === normTargetJobId) ||
+            (targetOrder &&
+             j.pickupFarm && targetOrder.farmName &&
+             j.pickupFarm.trim().toLowerCase() === targetOrder.farmName.trim().toLowerCase() &&
+             j.buyerName && targetOrder.buyerName &&
+             j.buyerName.trim().toLowerCase() === targetOrder.buyerName.trim().toLowerCase() &&
+             j.status !== 'delivered');
+
+          if (isMatch) {
+            fetch(`/api/transport-jobs/${j.id}`, {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                status: 'cancelled',
+                cancelReason: finalCancelReason,
+                cancelledAt: timeNow,
+              }),
+            }).catch((e) => console.log('Job cancel sync notice:', e));
+
+            return {
+              ...j,
+              status: 'cancelled' as const,
+              cancelReason: finalCancelReason,
+              cancelledAt: timeNow,
+            };
+          }
+          return j;
+        });
+        localStorage.setItem(STORAGE_KEYS.JOBS, JSON.stringify(updated));
+        return updated;
+      });
+
+      // Update orders state
+      setOrders((prev) => {
+        const updated = prev.map((o) =>
+          o.id === orderId || String(o.id).replace('#', '').trim().toLowerCase() === cleanOrderId
+            ? {
+                ...o,
+                status: 'cancelled' as OrderStatus,
+                cancelReason: finalCancelReason,
+                cancelledAt: timeNow,
+                cancelledBy: cancellerName,
+              }
+            : o
+        );
+        localStorage.setItem(STORAGE_KEYS.ORDERS, JSON.stringify(updated));
+        return updated;
+      });
+
+      // Sync cancellation to backend
+      fetch(`/api/orders/${orderId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          status: 'cancelled',
+          cancelReason: finalCancelReason,
+          cancelledAt: timeNow,
+          cancelledBy: cancellerName,
+        }),
+      }).catch((e) => console.log('Order cancel sync notice:', e));
+
+      appSync.publish('ORDERS_UPDATED', { id: orderId, status: 'cancelled' }, 'admin');
+      appSync.publish('JOBS_UPDATED', { orderId, status: 'cancelled' }, 'admin');
+      appSync.publish('PRODUCE_UPDATED', { restocked: true }, 'admin');
+      showToast(`Order #${orderId} cancelled. Restocked ${totalRestockedKg}kg back to supermarket stock!`);
+      return;
+    }
+
+    // Regular non-cancellation status update
     setOrders((prev) => {
       const updated = prev.map((o) => (o.id === orderId ? { ...o, status: newStatus } : o));
       localStorage.setItem(STORAGE_KEYS.ORDERS, JSON.stringify(updated));
@@ -989,7 +1200,7 @@ export default function App() {
       body: JSON.stringify(newItem),
     }).catch((e) => console.log('Product sync notice:', e));
 
-    showToast(`Harvest lot submitted to Seller Desk: ${newItem.name}`);
+    showToast(`Vegetable listed for sale: ${newItem.name}`);
   };
 
   // Farmer Edit Produce
@@ -2307,16 +2518,6 @@ export default function App() {
         <DAPriceWatchModal
           onClose={() => setIsGlobalPriceWatchOpen(false)}
           initialSearch={globalPriceWatchSearch}
-          onApplyPriceToHarvest={(cropName, suggestedPrice) => {
-            const matchedCrop = produceList.find(
-              (p) =>
-                p.name.toLowerCase().includes(cropName.toLowerCase().split(' ')[0]) ||
-                cropName.toLowerCase().includes(p.name.toLowerCase().split(' ')[0])
-            );
-            if (matchedCrop) {
-              handleUpdateProducePrice(matchedCrop.id, suggestedPrice);
-            }
-          }}
         />
       )}
 

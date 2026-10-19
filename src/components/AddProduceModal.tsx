@@ -186,9 +186,9 @@ export const AddProduceModal: React.FC<AddProduceModalProps> = ({
             </div>
             <div>
               <h3 className="font-extrabold text-base text-neutral-900 font-display">
-                {isEditMode ? 'Edit Harvest Lot' : 'Offer Harvest to Seller (Store)'}
+                {isEditMode ? 'Edit Vegetable Listing' : 'List Vegetable for Sale'}
               </h3>
-              <p className="text-[10px] text-emerald-700 font-medium">Offered for purchase & supermarket stocking</p>
+              <p className="text-[10px] text-emerald-700 font-medium">Add your fresh harvest for supermarket store purchase</p>
             </div>
           </div>
           <button
@@ -500,10 +500,6 @@ export const AddProduceModal: React.FC<AddProduceModalProps> = ({
         <DAPriceWatchModal
           onClose={() => setShowDABulletinModal(false)}
           initialSearch={name}
-          onApplyPriceToHarvest={(_, price) => {
-            setPricePerUnit(price.toFixed(2));
-            setShowDABulletinModal(false);
-          }}
         />
       )}
     </div>

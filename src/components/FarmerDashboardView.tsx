@@ -18,7 +18,12 @@ interface FarmerDashboardViewProps {
   onUpdateProduceStock: (id: string, newStock: number) => void;
   onUpdateProducePrice?: (id: string, newPrice: number) => void;
   onDeleteProduce: (id: string) => void;
-  onUpdateOrderStatus?: (orderId: string, status: Order['status']) => void;
+  onUpdateOrderStatus?: (
+    orderId: string,
+    status: Order['status'],
+    cancelReason?: string,
+    cancelledBy?: string
+  ) => void;
   onChatWithCustomer?: (order: Order) => void;
   onLogout?: () => void;
 }
@@ -157,21 +162,21 @@ export const FarmerDashboardView: React.FC<FarmerDashboardViewProps> = ({
 
         <div className="bg-white border border-neutral-200 rounded-2xl p-3 flex flex-col justify-between shadow-xs">
           <div className="flex items-center justify-between text-neutral-600 text-xs font-semibold">
-            <span>Harvest Lots</span>
+            <span>Listed Vegetables</span>
             <Sprout className="w-4 h-4 text-emerald-600" />
           </div>
           <div className="mt-2">
             <div className="text-xl font-extrabold text-emerald-700">
-              {myProduce.length} lot{myProduce.length === 1 ? '' : 's'}
+              {myProduce.length} vegetable{myProduce.length === 1 ? '' : 's'}
             </div>
             <div className="text-[10px] text-neutral-500 mt-0.5">
-              Offered to Seller Store
+              Available for Store Purchase
             </div>
           </div>
         </div>
       </div>
 
-      {/* Total Sales Banner at bottom of Crop Sales Payouts & Harvest Lots - Click redirects to Completed Orders */}
+      {/* Total Sales Banner at bottom of Crop Sales Payouts & Listed Vegetables - Click redirects to Completed Orders */}
       <button
         type="button"
         id="btn-farmer-total-sales"
@@ -217,7 +222,6 @@ export const FarmerDashboardView: React.FC<FarmerDashboardViewProps> = ({
           setPriceWatchSearch(searchCrop || '');
           setIsPriceWatchModalOpen(true);
         }}
-        onUpdateProducePrice={onUpdateProducePrice}
       />
 
       {/* Produce Inventory Management Section - Clean White Card */}
@@ -320,7 +324,7 @@ export const FarmerDashboardView: React.FC<FarmerDashboardViewProps> = ({
                       <div className="flex items-center gap-1.5 text-neutral-600 truncate">
                         <span className="text-emerald-700 font-bold flex-shrink-0">DA Presyo:</span>
                         <span className="truncate">
-                          Wet Market: <strong className="text-neutral-900">₱{daMatch.prevailingRetailPrice}</strong> • Farmgate: <strong className="text-amber-700 font-bold">₱{daMatch.prevailingFarmgatePrice}</strong>
+                          Wet Market: <strong className="text-neutral-900">₱{daMatch.prevailingRetailPrice}</strong> • DA Suggested: <strong className="text-emerald-700 font-bold">₱{daMatch.suggestedDirectFarmPrice}</strong>
                         </span>
                       </div>
                       {isDifference && (
@@ -379,7 +383,7 @@ export const FarmerDashboardView: React.FC<FarmerDashboardViewProps> = ({
 
                   {/* Fresh-Pick Terms Badge (fixed — no status selector) */}
                   <span
-                    title="This lot is picked fresh once the supermarket confirms the order"
+                    title="This crop is picked fresh once the supermarket confirms the order"
                     className="bg-emerald-50 border border-emerald-300 text-emerald-800 text-[11px] font-bold rounded-lg px-2 py-1 flex-shrink-0"
                   >
                     🌱 Fresh picked on Order
@@ -391,31 +395,13 @@ export const FarmerDashboardView: React.FC<FarmerDashboardViewProps> = ({
         )}
       </div>
 
-      {/* Sustainable Direct Farming Tips - Clean Light Emerald Card */}
-      <div className="bg-emerald-50 border border-emerald-200 rounded-2xl p-3.5 text-xs text-emerald-950 space-y-1.5">
-        <div className="flex items-center gap-1.5 font-bold text-emerald-800">
-          <Sprout className="w-4 h-4 text-emerald-600" /> Farmer Best Practices
-        </div>
-        <p className="text-[11px] text-emerald-900 leading-relaxed">
-          Every lot is <strong>picked fresh once the supermarket confirms the order</strong> — no pre-harvested stock, so buyers always receive peak-fresh produce.
-        </p>
-      </div>
+
 
       {/* Official DA AMAS Price Watch Modal */}
       {isPriceWatchModalOpen && (
         <DAPriceWatchModal
           onClose={() => setIsPriceWatchModalOpen(false)}
           initialSearch={priceWatchSearch}
-          onApplyPriceToHarvest={(cropName, suggestedPrice) => {
-            const matchedCrop = myProduce.find(
-              (p) =>
-                p.name.toLowerCase().includes(cropName.toLowerCase().split(' ')[0]) ||
-                cropName.toLowerCase().includes(p.name.toLowerCase().split(' ')[0])
-            );
-            if (matchedCrop && onUpdateProducePrice) {
-              onUpdateProducePrice(matchedCrop.id, suggestedPrice);
-            }
-          }}
         />
       )}
     </div>

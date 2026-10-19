@@ -151,6 +151,20 @@ async function tryConnectMysql() {
         await mysqlPool.query(`ALTER TABLE products ADD COLUMN sourcing_region VARCHAR(150)`);
       } catch (e) {}
 
+      // Older SQL dumps (veggie_connect2.sql) created some optional columns as
+      // NOT NULL, which made farmer product inserts fail with errors like
+      // "Column 'farmgate_asking_price' cannot be null" — silently losing new
+      // listings from the durable database. Relax them to nullable.
+      try {
+        await mysqlPool.query(`ALTER TABLE products MODIFY COLUMN farmgate_asking_price DECIMAL(10,2) NULL DEFAULT NULL`);
+      } catch (e) {}
+      try {
+        await mysqlPool.query(`ALTER TABLE products MODIFY COLUMN sourcing_region VARCHAR(150) NULL DEFAULT NULL`);
+      } catch (e) {}
+      try {
+        await mysqlPool.query(`ALTER TABLE products MODIFY COLUMN seller_store_name VARCHAR(150) NULL DEFAULT NULL`);
+      } catch (e) {}
+
     await mysqlPool.query(`
       CREATE TABLE IF NOT EXISTS products (
         id VARCHAR(64) PRIMARY KEY,
@@ -215,15 +229,23 @@ async function tryConnectMysql() {
         items_summary TEXT NOT NULL,
         weight_kg_est DECIMAL(6, 2) NOT NULL DEFAULT 1.0,
         earnings_peso DECIMAL(10, 2) NOT NULL,
-        status ENUM('available', 'accepted', 'picked_up', 'in_transit', 'delivered') NOT NULL DEFAULT 'available',
+        status ENUM('available', 'accepted', 'picked_up', 'in_transit', 'delivered', 'cancelled') NOT NULL DEFAULT 'available',
         assigned_transporter_id VARCHAR(64),
         assigned_transporter_name VARCHAR(120),
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       ) ENGINE=InnoDB;
     `);
 
+      // Safely ensure status ENUM supports 'cancelled'
+      try {
+        await mysqlPool.query(`ALTER TABLE transport_jobs MODIFY COLUMN status ENUM('available', 'accepted', 'picked_up', 'in_transit', 'delivered', 'cancelled') NOT NULL DEFAULT 'available'`);
+      } catch (e) {}
+
       isMysqlConnected = true;
       console.log(`[XAMPP MySQL] Connected to MySQL database "${dbConfig.database}" on ${connectedHost}:${dbConfig.port}!`);
+      // Rehydrate the in-memory stores from MySQL after a server restart so a
+      // fresh process never snapshots empty arrays over previously saved data.
+      hydrateMemoryFromMysql().catch(() => {});
     } catch (err: any) {
       isMysqlConnected = false;
       console.log(`[XAMPP MySQL] Table check notice: ${err.message}`);
@@ -264,6 +286,170 @@ let inMemorySupermarket: any = {
   latitude: 9.3080,
   longitude: 123.3105,
 };
+
+// --- Durable File-Backed Persistence (survives server restarts / app exits) ---
+// The in-memory stores above are the live source of truth while the server runs,
+// but they used to be lost every time the process exited (stopping `npm run dev`,
+// closing the terminal, crashes, or redeploys). Orders, transport jobs, and
+// messages were NEVER written to MySQL at all, so buyers and farmers lost their
+// data on every restart. This snapshot layer saves all stores to a local JSON
+// file after every successful write request and reloads them on boot.
+const DATA_DIR = path.resolve(process.cwd(), 'data');
+const DATA_STORE_FILE = path.join(DATA_DIR, 'server_store.json');
+
+let persistTimer: NodeJS.Timeout | null = null;
+
+function loadPersistedStore(): void {
+  try {
+    if (!fs.existsSync(DATA_STORE_FILE)) return;
+    const raw = fs.readFileSync(DATA_STORE_FILE, 'utf-8');
+    if (!raw || !raw.trim()) return;
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed?.users)) {
+      // Keep the seeded system admin, then restore every saved account.
+      for (const u of parsed.users) {
+        if (u && u.id && !inMemoryUsers.some((m) => m.id === u.id)) {
+          inMemoryUsers.push(u);
+        }
+      }
+    }
+    if (Array.isArray(parsed?.products)) inMemoryProducts = parsed.products;
+    if (Array.isArray(parsed?.orders)) inMemoryOrders = parsed.orders;
+    if (Array.isArray(parsed?.transportJobs)) inMemoryTransportJobs = parsed.transportJobs;
+    if (Array.isArray(parsed?.messages)) inMemoryMessages = parsed.messages;
+    if (parsed?.supermarket && typeof parsed.supermarket === 'object') {
+      inMemorySupermarket = { ...inMemorySupermarket, ...parsed.supermarket };
+    }
+    console.log(
+      `[Persistence] Restored snapshot: ${inMemoryUsers.length} users, ${inMemoryProducts.length} products, ${inMemoryOrders.length} orders, ${inMemoryTransportJobs.length} jobs, ${inMemoryMessages.length} messages.`
+    );
+  } catch (err: any) {
+    console.error('[Persistence] Failed to load data snapshot:', err?.message || err);
+  }
+}
+
+function persistStore(immediate = false): void {
+  const write = () => {
+    try {
+      if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+      const snapshot = {
+        savedAt: new Date().toISOString(),
+        users: inMemoryUsers,
+        products: inMemoryProducts,
+        orders: inMemoryOrders,
+        transportJobs: inMemoryTransportJobs,
+        messages: inMemoryMessages,
+        supermarket: inMemorySupermarket,
+      };
+      const tmpFile = `${DATA_STORE_FILE}.tmp`;
+      fs.writeFileSync(tmpFile, JSON.stringify(snapshot, null, 2), 'utf-8');
+      fs.renameSync(tmpFile, DATA_STORE_FILE);
+    } catch (err: any) {
+      console.error('[Persistence] Failed to save data snapshot:', err?.message || err);
+    }
+    persistTimer = null;
+  };
+
+  if (persistTimer) clearTimeout(persistTimer);
+  if (immediate) {
+    write();
+  } else {
+    persistTimer = setTimeout(write, 400);
+  }
+}
+
+loadPersistedStore();
+
+// When MySQL is available, merge any database rows that are missing from the
+// in-memory stores (e.g. after a server restart) so memory + file snapshots
+// stay consistent with the durable database.
+async function hydrateMemoryFromMysql(): Promise<void> {
+  if (!mysqlPool || !isMysqlConnected) return;
+  try {
+    const [userRows]: any = await mysqlPool.query('SELECT * FROM users');
+    if (Array.isArray(userRows)) {
+      for (const row of userRows) {
+        if (!row || !row.id || inMemoryUsers.some((u) => u.id === row.id)) continue;
+        inMemoryUsers.push({
+          id: row.id,
+          name: row.name,
+          email: row.email,
+          phone: row.phone,
+          role: row.role,
+          location: row.location,
+          farmName: row.farm_name || undefined,
+          vehicleType: row.vehicle_type || undefined,
+          plateNumber: row.plate_number || undefined,
+          avatar: row.avatar_url || '',
+          status: row.status || 'active',
+          verified: Boolean(row.is_verified),
+          password_hash: row.password_hash,
+        });
+      }
+    }
+    const [prodRows]: any = await mysqlPool.query('SELECT * FROM products ORDER BY created_at DESC');
+    if (Array.isArray(prodRows)) {
+      for (const r of prodRows) {
+        if (!r || !r.id || inMemoryProducts.some((p) => p.id === r.id)) continue;
+        inMemoryProducts.push({
+          id: r.id,
+          farmerId: r.farmer_id,
+          farmerName: r.farmer_name,
+          farmName: r.farm_name,
+          name: r.name,
+          category: r.category,
+          variety: r.variety,
+          pricePerUnit: parseFloat(r.price_per_unit),
+          unit: r.unit,
+          stockQuantity: r.stock_quantity,
+          minOrderQuantity: r.min_order_quantity,
+          harvestStatus: r.harvest_status,
+          harvestDate: r.harvest_date,
+          farmingMethod: r.farming_method,
+          imageUrl: r.image_url,
+          isOrganic: Boolean(r.is_organic),
+          description: r.description,
+          location: r.location,
+          distanceKm: parseFloat(r.distance_km),
+          rating: parseFloat(r.rating),
+          reviewsCount: r.reviews_count,
+          sellerStatus: r.seller_status || 'submitted',
+          brokerStatus: r.broker_status || 'approved_active',
+          sellerStoreName: r.seller_store_name || undefined,
+          farmgateAskingPrice: r.farmgate_asking_price ? parseFloat(r.farmgate_asking_price) : undefined,
+          boughtQuantity: r.bought_quantity || 0,
+          boughtAt: r.bought_at || undefined,
+          sourcingRegion: r.sourcing_region || undefined,
+        });
+      }
+    }
+  } catch (err: any) {
+    console.error('[MySQL Hydration] Notice:', err?.message || err);
+  }
+}
+
+// Auto-save after every non-GET /api request completes (covers all mutating
+// endpoints — signup, login caching, products, orders, jobs, messages, users).
+app.use('/api', (req, res, next) => {
+  if (req.method !== 'GET') {
+    res.on('finish', () => {
+      if (res.statusCode < 400) persistStore();
+    });
+  }
+  next();
+});
+
+// Flush any pending snapshot when the server exits so nothing is lost.
+const flushPersistedStoreOnExit = () => persistStore(true);
+process.on('exit', flushPersistedStoreOnExit);
+process.on('SIGINT', () => {
+  flushPersistedStoreOnExit();
+  process.exit(0);
+});
+process.on('SIGTERM', () => {
+  flushPersistedStoreOnExit();
+  process.exit(0);
+});
 
 // --- API ENDPOINTS ---
 
@@ -1022,20 +1208,120 @@ app.post('/api/orders', (req, res) => {
   res.status(201).json(order);
 });
 
-app.put('/api/orders/:id', (req, res) => {
+app.put('/api/orders/:id', async (req, res) => {
   const { id } = req.params;
   const updates = req.body;
   const order = inMemoryOrders.find((o) => o.id === id);
+
   if (!order) {
     inMemoryOrders.push({ id, ...updates });
     return res.json({ id, ...updates });
   }
+
+  const previousStatus = order.status;
+
+  // Handle Order Cancellation & Automatic Stock Restock
+  if (updates.status === 'cancelled' && previousStatus !== 'cancelled') {
+    const items = order.items || [];
+    let totalRestockedKg = 0;
+
+    for (const item of items) {
+      const prodId = item.produceId;
+      const prodName = (item.produceName || '').trim().toLowerCase();
+      const qty = Number(item.quantity) || 0;
+      if (qty <= 0) continue;
+
+      totalRestockedKg += qty;
+
+      // Restock in inMemoryProducts
+      const matchedProd = inMemoryProducts.find(
+        (p) => p.id === prodId || (p.name && p.name.trim().toLowerCase() === prodName)
+      );
+      if (matchedProd) {
+        matchedProd.stockQuantity = (Number(matchedProd.stockQuantity) || 0) + qty;
+        if (matchedProd.sellerStatus === 'sold_out') {
+          matchedProd.sellerStatus = 'bought_and_stocked';
+        }
+      }
+
+      // If connected to XAMPP MySQL, update database table
+      if (isMysqlConnected && mysqlPool && prodId) {
+        try {
+          await mysqlPool.query(
+            'UPDATE products SET stock_quantity = stock_quantity + ?, seller_status = CASE WHEN seller_status = "sold_out" THEN "bought_and_stocked" ELSE seller_status END WHERE id = ?',
+            [qty, prodId]
+          );
+        } catch (dbErr: any) {
+          console.log('[MySQL Restock Notice]:', dbErr.message);
+        }
+      }
+    }
+
+    // Cancel any associated transport job
+    const normOrderId = String(id || '').replace('#', '').trim().toLowerCase();
+    inMemoryTransportJobs.forEach((job) => {
+      const normJobOrderId = String(job.orderId || '').replace('#', '').trim().toLowerCase();
+      const normJobId = String(job.id || '').replace('#', '').trim().toLowerCase();
+      const normTargetJobId = String(order.transportJobId || '').replace('#', '').trim().toLowerCase();
+
+      const isMatch =
+        normJobOrderId === normOrderId ||
+        normJobId === normOrderId ||
+        (normTargetJobId && normJobId === normTargetJobId) ||
+        (order.farmName && job.pickupFarm && order.farmName.trim().toLowerCase() === job.pickupFarm.trim().toLowerCase() &&
+         order.buyerName && job.buyerName && order.buyerName.trim().toLowerCase() === job.buyerName.trim().toLowerCase() &&
+         job.status !== 'delivered');
+      if (isMatch) {
+        job.status = 'cancelled';
+        if (updates.cancelReason) job.cancelReason = updates.cancelReason;
+        job.cancelledAt = updates.cancelledAt || new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      }
+    });
+
+    if (isMysqlConnected && mysqlPool) {
+      try {
+        await mysqlPool.query(
+          "UPDATE transport_jobs SET status = 'cancelled' WHERE order_id = ? OR id = ?",
+          [id, order.transportJobId || id]
+        );
+      } catch (dbErr: any) {
+        console.log('[MySQL Cancel Transport Job Notice]:', dbErr.message);
+      }
+    }
+
+    console.log(
+      `[VeggieConnect Backend] Order #${id} cancelled. Restocked ${totalRestockedKg}kg across ${items.length} items. Reason: ${updates.cancelReason || 'User request'}`
+    );
+  }
+
   Object.assign(order, updates);
   res.json(order);
 });
 
 // 9. Transport Jobs: List, Create, and Update
 app.get('/api/transport-jobs', (req, res) => {
+  // Ensure consistency: if linked order is cancelled, the job is cancelled
+  inMemoryTransportJobs.forEach((job) => {
+    const normJobOrderId = String(job.orderId || '').replace('#', '').trim().toLowerCase();
+    const normJobId = String(job.id || '').replace('#', '').trim().toLowerCase();
+    const linked = inMemoryOrders.find((o) => {
+      const normOId = String(o.id || '').replace('#', '').trim().toLowerCase();
+      const normTargetJobId = String(o.transportJobId || '').replace('#', '').trim().toLowerCase();
+      return (
+        normOId === normJobOrderId ||
+        normOId === normJobId ||
+        (normTargetJobId && normJobId === normTargetJobId) ||
+        (o.farmName && job.pickupFarm && o.farmName.trim().toLowerCase() === job.pickupFarm.trim().toLowerCase() &&
+         o.buyerName && job.buyerName && o.buyerName.trim().toLowerCase() === job.buyerName.trim().toLowerCase() &&
+         job.status !== 'delivered')
+      );
+    });
+    if (linked && linked.status === 'cancelled') {
+      job.status = 'cancelled';
+      if (linked.cancelReason && !job.cancelReason) job.cancelReason = linked.cancelReason;
+      if (linked.cancelledAt && !job.cancelledAt) job.cancelledAt = linked.cancelledAt;
+    }
+  });
   res.json(inMemoryTransportJobs);
 });
 
@@ -1050,9 +1336,9 @@ app.post('/api/transport-jobs', (req, res) => {
   res.status(201).json(job);
 });
 
-app.put('/api/transport-jobs/:id', (req, res) => {
+app.put('/api/transport-jobs/:id', async (req, res) => {
   const { id } = req.params;
-  const { status, assignedTransporterId, assignedTransporterName } = req.body;
+  const { status, assignedTransporterId, assignedTransporterName, cancelReason, cancelledAt } = req.body;
 
   const job = inMemoryTransportJobs.find((j) => j.id === id);
   if (!job) return res.status(404).json({ error: 'Transport job not found' });
@@ -1060,17 +1346,20 @@ app.put('/api/transport-jobs/:id', (req, res) => {
   if (status) job.status = status;
   if (assignedTransporterId) job.assignedTransporterId = assignedTransporterId;
   if (assignedTransporterName) job.assignedTransporterName = assignedTransporterName;
+  if (cancelReason) job.cancelReason = cancelReason;
+  if (cancelledAt) job.cancelledAt = cancelledAt;
 
-  // Crucial: Automatically synchronize the corresponding order in server memory
+  // Crucial: Automatically synchronize the corresponding order in server memory (if not cancelled)
   const matchedOrder = inMemoryOrders.find(
     (o) =>
       (job.orderId && o.id === job.orderId) ||
+      (o.transportJobId && o.transportJobId === job.id) ||
       (o.farmName && job.pickupFarm && o.farmName.trim().toLowerCase() === job.pickupFarm.trim().toLowerCase() &&
        o.buyerName && job.buyerName && o.buyerName.trim().toLowerCase() === job.buyerName.trim().toLowerCase() &&
        o.status !== 'completed')
   );
 
-  if (matchedOrder) {
+  if (matchedOrder && matchedOrder.status !== 'cancelled') {
     if (assignedTransporterId) matchedOrder.transporterId = assignedTransporterId;
     if (assignedTransporterName) matchedOrder.transporterName = assignedTransporterName;
 
@@ -1079,6 +1368,15 @@ app.put('/api/transport-jobs/:id', (req, res) => {
     } else if (status === 'delivered') {
       matchedOrder.status = 'completed';
     }
+  }
+
+  if (isMysqlConnected && mysqlPool && status) {
+    try {
+      await mysqlPool.query(
+        'UPDATE transport_jobs SET status = ? WHERE id = ?',
+        [status, id]
+      );
+    } catch (e) {}
   }
 
   res.json(job);

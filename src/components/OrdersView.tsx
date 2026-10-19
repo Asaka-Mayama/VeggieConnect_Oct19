@@ -1,5 +1,21 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { ClipboardList, Clock, CheckCircle2, Truck, Store, MessageSquare, ChevronRight, FileText, Phone, X, ShieldCheck, MapPin } from 'lucide-react';
+import {
+  ClipboardList,
+  Clock,
+  CheckCircle2,
+  Truck,
+  Store,
+  MessageSquare,
+  ChevronRight,
+  FileText,
+  Phone,
+  X,
+  ShieldCheck,
+  MapPin,
+  XCircle,
+  AlertTriangle,
+  RotateCcw,
+} from 'lucide-react';
 import { Order, OrderStatus, UserRole, UserProfile } from '../types';
 import { FarmRouteMap } from './FarmRouteMap';
 import {
@@ -15,8 +31,13 @@ interface OrdersViewProps {
   userRole: UserRole;
   currentUser?: UserProfile | null;
   registeredUsers?: UserProfile[];
-  initialFilter?: 'all' | 'active' | 'completed';
-  onUpdateOrderStatus?: (orderId: string, newStatus: OrderStatus) => void;
+  initialFilter?: 'all' | 'active' | 'completed' | 'cancelled';
+  onUpdateOrderStatus?: (
+    orderId: string,
+    newStatus: OrderStatus,
+    cancelReason?: string,
+    cancelledBy?: string
+  ) => void;
   onChatWithParty?: (order: Order) => void;
 }
 
@@ -29,8 +50,12 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
   onUpdateOrderStatus,
   onChatWithParty,
 }) => {
-  const [filter, setFilter] = useState<'all' | 'active' | 'completed'>(initialFilter || 'all');
+  const [filter, setFilter] = useState<'all' | 'active' | 'completed' | 'cancelled'>(
+    initialFilter || 'all'
+  );
   const [selectedReceiptOrder, setSelectedReceiptOrder] = useState<Order | null>(null);
+  const [orderToCancel, setOrderToCancel] = useState<Order | null>(null);
+  const [cancelReasonInput, setCancelReasonInput] = useState<string>('');
   // Distance / ETA reported by each live route map (supermarket hub ➔ farmer's house)
   const [routeStatsByOrder, setRouteStatsByOrder] = useState<Record<string, { km: number; durationText: string }>>({});
 
@@ -81,6 +106,9 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
     if (filter === 'completed') {
       return order.status === 'completed';
     }
+    if (filter === 'cancelled') {
+      return order.status === 'cancelled';
+    }
     return true;
   });
 
@@ -122,7 +150,12 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
       case 'completed':
         return <span className="bg-neutral-100 text-neutral-800 border border-neutral-300 text-[10px] font-bold px-2.5 py-0.5 rounded-full">Delivered & Paid ✓</span>;
       case 'cancelled':
-        return <span className="bg-red-100 text-red-900 border border-red-300 text-[10px] font-bold px-2.5 py-0.5 rounded-full">Cancelled</span>;
+        return (
+          <span className="bg-red-100 text-red-900 border border-red-300 text-[10px] font-bold px-2.5 py-0.5 rounded-full flex items-center gap-1">
+            <XCircle className="w-3 h-3 text-red-600" />
+            <span>Cancelled & Restocked</span>
+          </span>
+        );
     }
   };
 
@@ -151,19 +184,19 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
           <p className="text-xs text-neutral-500 font-medium">
             {userRole === 'buyer'
               ? 'Quality-inspected, packed & delivered directly by VeggieConnect Logistics'
-              : 'Harvest lots purchased & fulfilled by VeggieConnect Store'}
+              : 'Vegetables purchased & fulfilled by VeggieConnect Store'}
           </p>
         </div>
       </div>
 
       {/* Tabs */}
-      <div className="flex gap-2 border-b border-emerald-200/80 pb-2.5">
-        {(['all', 'active', 'completed'] as const).map((tab) => (
+      <div className="flex gap-2 border-b border-emerald-200/80 pb-2.5 overflow-x-auto no-scrollbar">
+        {(['all', 'active', 'completed', 'cancelled'] as const).map((tab) => (
           <button
             key={tab}
             id={`tab-orders-${tab}`}
             onClick={() => setFilter(tab)}
-            className={`min-h-[40px] px-4 py-1.5 rounded-xl text-xs font-bold capitalize transition-colors cursor-pointer ${
+            className={`min-h-[40px] px-3.5 py-1.5 rounded-xl text-xs font-bold capitalize transition-colors cursor-pointer shrink-0 ${
               filter === tab
                 ? 'bg-emerald-600 text-white shadow-xs'
                 : 'text-neutral-600 hover:text-emerald-950 bg-white border border-emerald-200'
@@ -270,25 +303,50 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                   <div>{getStatusBadge(order.status)}</div>
                 </div>
 
-                {/* Progress Step Bar — live farmer ↔ supermarket tracker.
-                    Confirmed lights up ONLY after the owner starts the pickup
-                    route ('I'll Pick This Up'), never right after Buy Produce. */}
-                <div className="space-y-1.5 py-1">
-                  <div className="flex justify-between text-[10px] text-neutral-500 font-medium">
-                    <span className={step >= 1 ? 'text-emerald-700 font-bold' : ''}>Order Placed</span>
-                    <span className={step >= 2 ? 'text-emerald-700 font-bold' : ''}>Confirmed</span>
-                    <span className={step >= 3 ? 'text-emerald-700 font-bold' : ''}>
-                      {order.deliveryType === 'farm_pickup' ? 'Ready at Gate' : 'On the Way'}
-                    </span>
-                    <span className={step >= 4 ? 'text-emerald-700 font-bold' : ''}>Delivered</span>
+                {order.status === 'cancelled' ? (
+                  <div className="bg-red-50/80 border border-red-200/90 rounded-xl p-3 text-xs space-y-1.5">
+                    <div className="flex items-center justify-between font-bold">
+                      <span className="flex items-center gap-1.5 text-red-800">
+                        <XCircle className="w-4 h-4 text-red-600 flex-shrink-0" />
+                        <span>Order Cancelled {order.cancelledAt ? `(${order.cancelledAt})` : ''}</span>
+                      </span>
+                      <span className="text-[10px] bg-emerald-100 text-emerald-800 font-extrabold px-2 py-0.5 rounded-md flex items-center gap-1 border border-emerald-300">
+                        <CheckCircle2 className="w-3 h-3 text-emerald-600 flex-shrink-0" />
+                        <span>+{order.items.reduce((s, it) => s + (it.quantity || 0), 0)} kg Restocked to Stock</span>
+                      </span>
+                    </div>
+                    {order.cancelReason && (
+                      <p className="text-[11px] text-red-900 leading-snug">
+                        <strong>Reason:</strong> {order.cancelReason}
+                      </p>
+                    )}
+                    {order.cancelledBy && (
+                      <p className="text-[10px] text-neutral-500">
+                        Cancelled by: {order.cancelledBy}
+                      </p>
+                    )}
                   </div>
-                  <div className="h-2 w-full bg-emerald-100 rounded-full overflow-hidden flex">
-                    <div
-                      className="h-full bg-emerald-600 rounded-full transition-all duration-500"
-                      style={{ width: `${Math.min(100, (step / 4) * 100)}%` }}
-                    />
+                ) : (
+                  /* Progress Step Bar — live farmer ↔ supermarket tracker.
+                     Confirmed lights up ONLY after the owner starts the pickup
+                     route ('I'll Pick This Up'), never right after Buy Produce. */
+                  <div className="space-y-1.5 py-1">
+                    <div className="flex justify-between text-[10px] text-neutral-500 font-medium">
+                      <span className={step >= 1 ? 'text-emerald-700 font-bold' : ''}>Order Placed</span>
+                      <span className={step >= 2 ? 'text-emerald-700 font-bold' : ''}>Confirmed</span>
+                      <span className={step >= 3 ? 'text-emerald-700 font-bold' : ''}>
+                        {order.deliveryType === 'farm_pickup' ? 'Ready at Gate' : 'On the Way'}
+                      </span>
+                      <span className={step >= 4 ? 'text-emerald-700 font-bold' : ''}>Delivered</span>
+                    </div>
+                    <div className="h-2 w-full bg-emerald-100 rounded-full overflow-hidden flex">
+                      <div
+                        className="h-full bg-emerald-600 rounded-full transition-all duration-500"
+                        style={{ width: `${Math.min(100, (step / 4) * 100)}%` }}
+                      />
+                    </div>
                   </div>
-                </div>
+                )}
 
                 {/* Order Items Preview */}
                 <div className="space-y-2 bg-emerald-50/50 p-3 rounded-xl border border-emerald-200/70 text-xs">
@@ -501,6 +559,22 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                         <span className="truncate">Confirm Received</span>
                       </button>
                     )}
+
+                    {/* Cancellation Action: Available only for Buyer and Admin accounts (Farmer account removed) */}
+                    {userRole !== 'farmer' && (order.status === 'pending' || order.status === 'confirmed') && onUpdateOrderStatus && (
+                      <button
+                        id={`btn-cancel-order-${order.id}`}
+                        onClick={() => {
+                          setOrderToCancel(order);
+                          setCancelReasonInput('');
+                        }}
+                        className="flex-1 min-w-[105px] h-10 px-2 sm:px-3 rounded-xl bg-red-50 hover:bg-red-100 text-red-700 hover:text-red-800 text-xs font-bold flex items-center justify-center gap-1.5 border border-red-200 cursor-pointer transition-all active:scale-95 shadow-2xs"
+                        title="Cancel order and restock items to inventory"
+                      >
+                        <XCircle className="w-3.5 h-3.5 text-red-600 flex-shrink-0" />
+                        <span className="truncate">Cancel Order</span>
+                      </button>
+                    )}
                   </div>
                 </div>
               </div>
@@ -587,6 +661,99 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
             >
               Close Receipt
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* Order Cancellation & Restock Confirmation Modal */}
+      {orderToCancel && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs animate-in fade-in duration-200">
+          <div className="bg-white border border-red-200 rounded-3xl w-full max-w-sm max-h-[92%] overflow-y-auto p-5 space-y-4 text-neutral-900 shadow-2xl relative">
+            <button
+              onClick={() => {
+                setOrderToCancel(null);
+                setCancelReasonInput('');
+              }}
+              className="absolute top-4 right-4 w-8 h-8 rounded-full bg-neutral-100 text-neutral-600 flex items-center justify-center hover:bg-neutral-200 cursor-pointer"
+            >
+              <X className="w-4 h-4" />
+            </button>
+
+            <div className="flex items-center gap-2.5 text-red-700">
+              <div className="w-9 h-9 rounded-xl bg-red-100 flex items-center justify-center shrink-0">
+                <AlertTriangle className="w-5 h-5 text-red-600" />
+              </div>
+              <div className="min-w-0">
+                <h3 className="font-extrabold text-sm text-neutral-900 truncate">Cancel Order & Restock</h3>
+                <p className="text-[11px] text-neutral-500 font-mono">Order ID: {orderToCancel.id}</p>
+              </div>
+            </div>
+
+            {/* Inventory Restock Breakdown Box */}
+            <div className="bg-emerald-50 border border-emerald-200 rounded-2xl p-3 space-y-2 text-xs">
+              <div className="flex items-center gap-1.5 font-bold text-emerald-950">
+                <RotateCcw className="w-3.5 h-3.5 text-emerald-600" />
+                <span>Automatic Inventory Restock</span>
+              </div>
+              <p className="text-[11px] text-emerald-800 leading-relaxed">
+                Cancelling this order immediately returns all reserved kilograms back to the supermarket live inventory:
+              </p>
+              <div className="space-y-1 pt-1 border-t border-emerald-200/80">
+                {orderToCancel.items.map((item, idx) => (
+                  <div key={idx} className="flex items-center justify-between text-[11px] text-emerald-950">
+                    <span className="font-medium truncate mr-2">• {item.produceName}</span>
+                    <span className="font-bold text-emerald-700 shrink-0">+{item.quantity} kg</span>
+                  </div>
+                ))}
+              </div>
+              <div className="pt-1.5 text-right text-[11px] font-black text-emerald-950 border-t border-emerald-200/60">
+                Total Restocked: +{orderToCancel.items.reduce((s, it) => s + (it.quantity || 0), 0)} kg
+              </div>
+            </div>
+
+            {/* Direct Cancellation Reason Input (No multiple choice / radio buttons) */}
+            <div className="space-y-1.5 text-xs">
+              <label className="font-bold text-neutral-800 block">
+                Reason for Cancellation:
+              </label>
+              <textarea
+                rows={3}
+                placeholder="Type your cancellation reason here (e.g., buyer requested change, incorrect address, etc.)..."
+                value={cancelReasonInput}
+                onChange={(e) => setCancelReasonInput(e.target.value)}
+                className="w-full px-3 py-2 text-xs rounded-xl border border-neutral-300 focus:outline-none focus:ring-2 focus:ring-red-500 bg-neutral-50 focus:bg-white resize-none"
+              />
+            </div>
+
+            {/* Action Buttons */}
+            <div className="space-y-2 pt-2 border-t border-neutral-200">
+              <button
+                onClick={() => {
+                  const finalReason = cancelReasonInput.trim() || 'Cancelled upon request';
+                  const cancellerName =
+                    currentUser?.name || (userRole === 'admin' ? 'Admin' : 'Buyer');
+                  if (onUpdateOrderStatus) {
+                    onUpdateOrderStatus(orderToCancel.id, 'cancelled', finalReason, cancellerName);
+                  }
+                  setOrderToCancel(null);
+                  setCancelReasonInput('');
+                }}
+                className="w-full py-2.5 px-4 rounded-xl bg-red-600 hover:bg-red-700 text-white font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer shadow-sm active:scale-95 transition-all"
+              >
+                <XCircle className="w-4 h-4" />
+                <span>Confirm Cancellation & Restock Stock</span>
+              </button>
+
+              <button
+                onClick={() => {
+                  setOrderToCancel(null);
+                  setCancelReasonInput('');
+                }}
+                className="w-full py-2 px-4 rounded-xl bg-neutral-100 hover:bg-neutral-200 text-neutral-700 font-bold text-xs text-center cursor-pointer transition-colors"
+              >
+                Keep Order
+              </button>
+            </div>
           </div>
         </div>
       )}

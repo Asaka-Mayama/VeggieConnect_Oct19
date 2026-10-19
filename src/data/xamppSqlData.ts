@@ -166,7 +166,7 @@ CREATE TABLE \`transport_jobs\` (
   \`items_summary\` TEXT NOT NULL,
   \`weight_kg_est\` DECIMAL(6,2) NOT NULL DEFAULT 1.00,
   \`earnings_peso\` DECIMAL(10,2) NOT NULL,
-  \`status\` ENUM('available', 'accepted', 'picked_up', 'in_transit', 'delivered') NOT NULL DEFAULT 'available',
+  \`status\` ENUM('available', 'accepted', 'picked_up', 'in_transit', 'delivered', 'cancelled') NOT NULL DEFAULT 'available',
   \`assigned_transporter_id\` VARCHAR(64) DEFAULT NULL,
   \`assigned_transporter_name\` VARCHAR(120) DEFAULT NULL,
   \`created_at\` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,

@@ -267,7 +267,7 @@ export const TransporterPortalView: React.FC<TransporterPortalViewProps> = ({
   const [routeStats, setRouteStats] = useState<{ distanceKm: number; durationText: string } | null>(null);
 
   const myActiveJobs = jobs.filter(
-    (j) => j.assignedTransporterId === transporter.id && j.status !== 'delivered'
+    (j) => j.assignedTransporterId === transporter.id && j.status !== 'delivered' && j.status !== 'cancelled'
   );
 
   const availableJobs = jobs.filter((j) => j.status === 'available');

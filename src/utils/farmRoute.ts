@@ -291,7 +291,7 @@ export function resolveLiveTransactionAdminLocation(
   if (persistedHubPin) {
     return {
       storeName: savedSupermarket.storeName || DEFAULT_SUPERMARKET.storeName,
-      address: persistedHub.address || savedSupermarket.address || DEFAULT_SUPERMARKET.address,
+      address: persistedHub?.address || savedSupermarket.address || DEFAULT_SUPERMARKET.address,
       latitude: persistedHubPin.lat,
       longitude: persistedHubPin.lng,
     };

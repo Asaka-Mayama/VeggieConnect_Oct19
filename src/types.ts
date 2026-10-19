@@ -153,11 +153,17 @@ export interface Order {
   status: OrderStatus;
   transportJobId?: string;
   notes?: string;
+  cancelReason?: string;
+  cancelledAt?: string;
+  cancelledBy?: string;
   createdAt?: string;
   transporterId?: string;
   transporterName?: string;
   transporterPhone?: string;
   vehicleType?: string;
+  rating?: number;
+  reviewComment?: string;
+  ratedAt?: string;
 }
 
 export interface TransportJob {
@@ -171,10 +177,12 @@ export interface TransportJob {
   itemsSummary: string;
   weightKgEst: number;
   earningsPeso: number;
-  status: 'available' | 'accepted' | 'picked_up' | 'in_transit' | 'delivered';
+  status: 'available' | 'accepted' | 'picked_up' | 'in_transit' | 'delivered' | 'cancelled';
   assignedTransporterId?: string;
   assignedTransporterName?: string;
   assignedTransporterPhone?: string;
+  cancelReason?: string;
+  cancelledAt?: string;
   createdAt?: string;
 }
 

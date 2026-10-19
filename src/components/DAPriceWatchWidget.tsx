@@ -7,8 +7,7 @@ import {
   RefreshCw,
   Sprout,
   CheckCircle2,
-  ChevronRight,
-  Check
+  ChevronRight
 } from 'lucide-react';
 import { ProduceItem } from '../types';
 import { DA_BULLETIN_METADATA, DA_DAILY_PRICES, findMatchingDAPrice } from '../data/daPricesData';
@@ -16,18 +15,15 @@ import { DA_BULLETIN_METADATA, DA_DAILY_PRICES, findMatchingDAPrice } from '../d
 interface DAPriceWatchWidgetProps {
   myProduce: ProduceItem[];
   onOpenFullBulletin: (searchCrop?: string) => void;
-  onUpdateProducePrice?: (produceId: string, newPrice: number) => void;
 }
 
 export const DAPriceWatchWidget: React.FC<DAPriceWatchWidgetProps> = ({
   myProduce,
   onOpenFullBulletin,
-  onUpdateProducePrice,
 }) => {
   const [quickSearch, setQuickSearch] = useState('');
   const [isSyncing, setIsSyncing] = useState(false);
   const [syncFeedback, setSyncFeedback] = useState<string | null>(null);
-  const [updatedCropSuccess, setUpdatedCropSuccess] = useState<string | null>(null);
 
   // Top highlight movers for the ticker carousel
   const topMovers = useMemo(() => {
@@ -80,14 +76,6 @@ export const DAPriceWatchWidget: React.FC<DAPriceWatchWidgetProps> = ({
     }
   };
 
-  const handleApplyDAPrice = (produceId: string, price: number, cropName: string) => {
-    if (onUpdateProducePrice) {
-      onUpdateProducePrice(produceId, price);
-      setUpdatedCropSuccess(`Updated ${cropName} to DA Direct Price: ₱${price.toFixed(2)}/kg`);
-      setTimeout(() => setUpdatedCropSuccess(null), 3500);
-    }
-  };
-
   return (
     <div className="bg-white border border-emerald-200/90 rounded-3xl p-4 shadow-sm space-y-3.5 relative overflow-hidden text-neutral-900">
       
@@ -132,13 +120,6 @@ export const DAPriceWatchWidget: React.FC<DAPriceWatchWidgetProps> = ({
         <div className="bg-emerald-50 border border-emerald-200 text-[11px] text-emerald-900 px-3 py-1.5 rounded-xl flex items-center gap-1.5 animate-in fade-in">
           <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 flex-shrink-0" />
           <span>{syncFeedback}</span>
-        </div>
-      )}
-
-      {updatedCropSuccess && (
-        <div className="bg-emerald-50 border border-emerald-300 text-[11px] text-emerald-900 px-3 py-1.5 rounded-xl flex items-center gap-1.5 animate-in fade-in">
-          <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 flex-shrink-0" />
-          <span>{updatedCropSuccess}</span>
         </div>
       )}
 
@@ -306,28 +287,6 @@ export const DAPriceWatchWidget: React.FC<DAPriceWatchWidgetProps> = ({
                       </span>
                     </div>
                   </div>
-
-                  {/* 1-Click Quick Price Alignment */}
-                  {onUpdateProducePrice && Math.abs(produce.pricePerUnit - daMatch.suggestedDirectFarmPrice) > 1 && (
-                    <div className="flex items-center justify-between bg-white rounded-xl px-2.5 py-1.5 border border-neutral-200 text-[11px]">
-                      <span className="text-neutral-600">
-                        Suggested Direct: <strong>₱{daMatch.suggestedDirectFarmPrice.toFixed(2)}/{produce.unit}</strong>
-                      </span>
-                      <button
-                        onClick={() =>
-                          handleApplyDAPrice(
-                            produce.id,
-                            daMatch.suggestedDirectFarmPrice,
-                            produce.name
-                          )
-                        }
-                        className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-[10px] flex items-center gap-1 shadow-xs active:scale-95 transition-all cursor-pointer"
-                      >
-                        <Check className="w-3 h-3 stroke-[3]" />
-                        <span>Use Price</span>
-                      </button>
-                    </div>
-                  )}
                 </div>
               );
             })}
